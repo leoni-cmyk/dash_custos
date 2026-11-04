@@ -21,10 +21,8 @@ if "df_indireto" not in st.session_state:
 
 # ==========================================
 # BARRA LATERAL (SIDEBAR) & NAVEGAÇÃO
+# ==========================================
 st.sidebar.image("logo_feso.png", use_container_width=True)
-# Para colocar a logo real, basta subir a imagem no GitHub e colocar o nome do arquivo aqui, ex: st.sidebar.image("logo_feso.png")
-# Por enquanto, deixei um placeholder (imagem de espaço reservado)
-st.sidebar.image("https://via.placeholder.com/300x100.png?text=LOGO+DA+FUNDACAO", use_container_width=True)
 st.sidebar.title("Navegação")
 
 # Ordem invertida: Dashboard vem primeiro
