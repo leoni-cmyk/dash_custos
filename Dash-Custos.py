@@ -3,49 +3,76 @@ import pandas as pd
 import plotly.express as px
 
 # 1. Configuração inicial da página
-st.set_page_config(page_title="Dashboard de Custos", layout="wide")
-st.title("📊 Gestão de Custos Institucionais")
-st.markdown("Faça o upload da base Excel exportada do sistema para atualizar os indicadores.")
+st.set_page_config(page_title="Gestão de Custos", layout="wide")
 
-# 2. Upload do Arquivo
-arquivo_excel = st.file_uploader("Selecione a base de custos (.xlsx)", type=["xlsx"])
+# 2. Inicialização da "Memória" do aplicativo (Session State)
+# Isso garante que ao trocar de tela no menu, os dados não sejam perdidos
+if "df_direto" not in st.session_state:
+    st.session_state["df_direto"] = None
+if "df_indireto" not in st.session_state:
+    st.session_state["df_indireto"] = None
 
-if arquivo_excel:
-    # Leitura dos dados
-    df = pd.read_excel(arquivo_excel)
+# 3. Criação do Menu Lateral
+st.sidebar.title("Navegação")
+menu = st.sidebar.radio(
+    "Selecione a página:",
+    ["📥 Importação de Dados", "📊 Dashboard Principal"]
+)
+
+# ==========================================
+# TELA 1: IMPORTAÇÃO DE DADOS
+# ==========================================
+if menu == "📥 Importação de Dados":
+    st.title("📥 Importação das Bases de Custos")
+    st.markdown("Faça o upload dos arquivos extraídos do sistema.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Custos Diretos")
+        arquivo_direto = st.file_uploader("Base de Custos Diretos (.xlsx)", type=["xlsx"], key="direto")
+        if arquivo_direto:
+            st.session_state["df_direto"] = pd.read_excel(arquivo_direto)
+            st.success("✅ Custos Diretos carregados na memória!")
+
+    with col2:
+        st.subheader("Custos Indiretos (Rateios)")
+        arquivo_indireto = st.file_uploader("Base de Custos Indiretos (.xlsx)", type=["xlsx"], key="indireto")
+        if arquivo_indireto:
+            st.session_state["df_indireto"] = pd.read_excel(arquivo_indireto)
+            st.success("✅ Custos Indiretos carregados na memória!")
+
+    # Botão para limpar a memória caso você suba o arquivo errado
+    st.markdown("---")
+    if st.button("🗑️ Limpar Bases Importadas"):
+        st.session_state["df_direto"] = None
+        st.session_state["df_indireto"] = None
+        st.rerun()
+
+# ==========================================
+# TELA 2: DASHBOARD PRINCIPAL
+# ==========================================
+elif menu == "📊 Dashboard Principal":
+    st.title("📊 Dashboard de Custos Institucionais")
+
+    # Verifica se as bases foram importadas
+    if st.session_state["df_direto"] is None or st.session_state["df_indireto"] is None:
+        st.warning("⚠️ Dados incompletos. Por favor, vá ao menu 'Importação de Dados' e carregue os dois arquivos antes de visualizar o dashboard.")
     
-    # Tratamento básico de dados (garantir que Período é texto)
-    if "Período" in df.columns:
-        df["Período"] = df["Período"].astype(str)
-        
-    st.success("Base carregada com sucesso!")
-
-    # 3. Filtros na Barra Lateral
-    st.sidebar.header("Filtros de Análise")
-    
-    # Criar filtros dinamicamente se as colunas existirem
-    if all(col in df.columns for col in ["Período", "Segmento", "Classificação"]):
-        periodos = st.sidebar.multiselect("Período", df["Período"].unique(), default=df["Período"].unique())
-        segmentos = st.sidebar.multiselect("Segmento", df["Segmento"].unique(), default=df["Segmento"].unique())
-        classificacoes = st.sidebar.multiselect("Classificação", df["Classificação"].unique(), default=df["Classificação"].unique())
-
-        # Aplicar filtros
-        df_filtrado = df[
-            (df["Período"].isin(periodos)) &
-            (df["Segmento"].isin(segmentos)) &
-            (df["Classificação"].isin(classificacoes))
-        ]
     else:
-        st.sidebar.warning("As colunas 'Período', 'Segmento' e 'Classificação' não foram encontradas na base.")
-        df_filtrado = df
+        # Recupera as bases da memória
+        df_direto = st.session_state["df_direto"]
+        df_indireto = st.session_state["df_indireto"]
 
-    # 4. Exibição de Dados Básica (Para o 1º teste)
-    if "Valor" in df_filtrado.columns:
-        total = df_filtrado["Valor"].sum()
-        st.metric("Custo Total (Filtrado)", f"R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    
-    st.subheader("Pré-visualização da Base")
-    st.dataframe(df_filtrado.head(100), use_container_width=True)
-
-else:
-    st.info("Aguardando arquivo de dados...")
+        st.success("Bases conectadas com sucesso! O Dashboard será renderizado aqui.")
+        
+        # Só para testarmos se ele leu certinho:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Prévia - Custos Diretos**")
+            st.dataframe(df_direto.head(), use_container_width=True)
+        with col2:
+            st.markdown("**Prévia - Custos Indiretos**")
+            st.dataframe(df_indireto.head(), use_container_width=True)
+            
+        # (Nos próximos commits, colocaremos toda a lógica de filtros e gráficos aqui)
