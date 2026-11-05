@@ -109,7 +109,7 @@ def grafico_grupos(g):
     fig.update_layout(
         height=max(140, len(g) * 28 + 50),
         margin=dict(l=0, r=10, t=10, b=10),
-        separators=",.", # AJUSTE FINO: Padrão pt-BR no Plotly (Vírgula para decimal, ponto milhar)
+        separators=",.", # AJUSTE FINO: Padrão pt-BR no Plotly
         hoverlabel=dict(
             bgcolor="rgba(25, 28, 36, 0.95)",
             font_size=13,
@@ -189,7 +189,6 @@ def bloco_segmentos(L, i, cad, periodos, com_origem, segmentos_filtrados=None):
         })
         tabela(t, {"Direto": cc.brl, "Recebido (Inter)": cc.brl, "Total": cc.brl, "Rateado (Inter)": dash})
 
-        # Detalhamento de quem enviou os rateios inter-segmento se houver filtro de segmento
         if segmentos_filtrados and len(segmentos_filtrados) < len(cad["segmento"].unique()):
             dt_inter = cc.detalhe_origens_inter_segmento(i, periodos, segmentos_filtrados)
             if not dt_inter.empty:
@@ -318,7 +317,7 @@ def pagina_relatorio():
     # Processamento dos Dados do Relatório
     pv_dir = cc.relatorio_direto_pivot(d, cc_id, ano_sel, mes_limite=mes_limite)
     pv_seg, detalhes_seg = cc.relatorio_indireto_por_segmento(i, cc_id, ano_sel, mes_limite=mes_limite)
-    pv_tot = cc.relatorio_total_pivot(pv_dir, pv_seg, mes_limite=mes_limite) # AJUSTE FINO: Custo Total
+    pv_tot = cc.relatorio_total_pivot(pv_dir, pv_seg, mes_limite=mes_limite)
     
     with col_pdf:
         pdf_bytes = cc.gerar_pdf_relatorio(info, pv_dir, pv_seg, detalhes_seg, pv_tot, ano_sel, mes_limite)
@@ -354,7 +353,7 @@ def pagina_relatorio():
         
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # 3. Custo Total Consolidado (AJUSTE FINO NOVO)
+    # 3. Custo Total Consolidado
     st.subheader(f"3. Custo Total do Centro (Direto + Indireto - Acumulado até Mês {mes_limite:02d})")
     if not pv_tot.empty:
         fmt_tot = {col: cc.brl for col in pv_tot.columns}
@@ -372,15 +371,23 @@ def pagina_relatorio():
             fmt_sub = {col: cc.brl for col in pv_sub.columns}
             st.dataframe(pv_sub.style.format(fmt_sub), use_container_width=True, height=min(38 * (len(pv_sub) + 1) + 3, 400))
 
-def bloco_upload(tipo, titulo, campos, normalizar):
+# AJUSTE FINO: Uploads Múltiplos (Appends na Base)
+def bloco_upload_multiplo(tipo, titulo, campos, normalizar):
     st.subheader(titulo)
     arq = st.file_uploader(f"Planilha (.xlsx) — {titulo.lower()}", type=["xlsx"], key=f"up_{tipo}")
     if arq is None: return
+    
+    df_atual = st.session_state.get(f"df_{tipo}")
+    if df_atual is not None and not df_atual.empty and 'arquivo_origem' in df_atual.columns:
+        if arq.name in df_atual['arquivo_origem'].unique():
+            st.warning(f"⚠️ O arquivo '{arq.name}' já está na base. Se continuar, os valores serão duplicados.")
+            
     raw = ler_excel(arq.getvalue())
     auto = cc.auto_mapear(raw.columns, campos)
     faltando = [rot for ch, rot, obr, _ in campos if obr and not auto[ch]]
     opcoes = ["— não usar —"] + [str(c) for c in raw.columns]
     mapa = {}
+    
     with st.expander("Mapeamento de colunas", expanded=bool(faltando)):
         for ch, rot, obr, _ in campos:
             padrao = opcoes.index(str(auto[ch])) if auto[ch] is not None else 0
@@ -389,45 +396,72 @@ def bloco_upload(tipo, titulo, campos, normalizar):
 
     ainda = [rot for ch, rot, obr, _ in campos if obr and not mapa[ch]]
     if ainda: return st.error("Faltam colunas: " + ", ".join(ainda))
-    st.caption(f"{len(raw):,} linhas lidas.")
-    if st.button("Carregar base", key=f"btn_{tipo}", type="primary"):
-        df = normalizar(raw, mapa)
-        st.session_state[f"df_{tipo}"] = df
-        salvar_base(tipo, df)
+    
+    if st.button(f"📥 Adicionar Arquivo à {titulo}", key=f"btn_{tipo}", type="primary"):
+        df_novo = normalizar(raw, mapa)
+        df_novo['arquivo_origem'] = arq.name # Identifica de onde os dados vieram
+        
+        if df_atual is not None and not df_atual.empty:
+            df_final = pd.concat([df_atual, df_novo], ignore_index=True)
+        else:
+            df_final = df_novo
+            
+        st.session_state[f"df_{tipo}"] = df_final
+        salvar_base(tipo, df_final)
         atualizar_cadastro()
-        st.success("✅ Base carregada com sucesso!")
+        st.success(f"✅ {len(df_novo):,} linhas do arquivo '{arq.name}' adicionadas com sucesso!")
 
-def bloco_base(tipo, titulo):
+# AJUSTE FINO: Exibição Múltipla com Exclusão Individual
+def bloco_base_multiplo(tipo, titulo):
     st.subheader(titulo)
     df = st.session_state.get(f"df_{tipo}")
     
-    if df is None: 
+    if df is None or df.empty: 
         return st.info("Nenhuma base carregada no momento.")
-    
-    # AJUSTE FINO: Visão limpa e objetiva das bases importadas (Sem carregar a tabela inteira)
-    st.success(f"Arquivo carregado com sucesso.")
+        
     c1, c2 = st.columns(2)
-    c1.metric("Linhas Processadas", f"{len(df):,}".replace(",", "."))
-    c2.metric("Valor Total da Base", cc.brl(df['valor'].sum()))
+    c1.metric("Total de Linhas Consolidadas", f"{len(df):,}".replace(",", "."))
+    c2.metric("Valor Total Acumulado", cc.brl(df['valor'].sum()))
     
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button(f"🗑️ Excluir base '{titulo.lower()}'", key=f"del_{tipo}", type="primary", use_container_width=True): 
-        remover_base(tipo)
-        st.rerun()
+    st.markdown("#### 📂 Arquivos Importados:")
+    
+    if 'arquivo_origem' not in df.columns:
+        df['arquivo_origem'] = 'Importação Legada / Antiga'
+        st.session_state[f"df_{tipo}"] = df
+        salvar_base(tipo, df)
+        
+    arquivos = df['arquivo_origem'].unique()
+    
+    for arq_nome in arquivos:
+        df_arq = df[df['arquivo_origem'] == arq_nome]
+        with st.container(border=True):
+            cols = st.columns([3, 1])
+            cols[0].markdown(f"📄 **{arq_nome}**")
+            cols[0].caption(f"{len(df_arq):,} linhas processadas | Total R$: {cc.brl(df_arq['valor'].sum())}")
+            
+            if cols[1].button("🗑️ Excluir Arquivo", key=f"del_{tipo}_{arq_nome}"):
+                df_restante = df[df['arquivo_origem'] != arq_nome]
+                if df_restante.empty:
+                    remover_base(tipo)
+                else:
+                    st.session_state[f"df_{tipo}"] = df_restante
+                    salvar_base(tipo, df_restante)
+                atualizar_cadastro()
+                st.rerun()
 
 def pagina_dados():
     st.title("📥 Gerenciamento de bases de custos")
-    t1, t2 = st.tabs(["Upload de arquivos", "Visualizar & Excluir Bases Carregadas"])
+    t1, t2 = st.tabs(["Upload de Arquivos", "Visualizar & Excluir Arquivos Carregados"])
     with t1:
         c1, c2 = st.columns(2)
-        with c1: bloco_upload("direto", "Custos diretos", cc.CAMPOS_DIRETO, cc.normalizar_direto)
-        with c2: bloco_upload("indireto", "Custos indiretos (rateios)", cc.CAMPOS_INDIRETO, cc.normalizar_indireto)
+        with c1: bloco_upload_multiplo("direto", "Custos Diretos", cc.CAMPOS_DIRETO, cc.normalizar_direto)
+        with c2: bloco_upload_multiplo("indireto", "Custos Indiretos (Rateios)", cc.CAMPOS_INDIRETO, cc.normalizar_indireto)
     with t2:
         c1, c2 = st.columns(2)
         with c1: 
-            with st.container(border=True): bloco_base("direto", "Base Direta")
+            with st.container(border=True): bloco_base_multiplo("direto", "Base Direta")
         with c2: 
-            with st.container(border=True): bloco_base("indireto", "Base Indireta")
+            with st.container(border=True): bloco_base_multiplo("indireto", "Base Indireta")
 
 # ======================================================================
 # Navegação
