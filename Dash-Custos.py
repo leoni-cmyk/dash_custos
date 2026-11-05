@@ -1,200 +1,438 @@
-import streamlit as st
+"""
+Dashboard de Custos 2026 — versão Streamlit do dashboard HTML.
+Rodar com:  streamlit run app.py
+"""
+import inspect
+import io
+from pathlib import Path
+
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
-# 1. Configuração inicial da página
-st.set_page_config(page_title="Gestão de Custos", layout="wide")
+import custos_core as cc
 
-# Função de Cache para alta performance na leitura de dados
-@st.cache_data
-def processar_excel(arquivo):
-    df = pd.read_excel(arquivo)
-    if "Período" in df.columns:
-        df["Período"] = df["Período"].astype(str)
-    return df
+# Paleta do dashboard HTML
+COR_DIRETO, COR_RATEIO, COR_RATEADO, COR_GRUPO = "#2f6fed", "#f08c2e", "#16a37f", "#8b5cf6"
+DATA_DIR = Path(__file__).parent / "dados"  # bases persistidas em disco (sobrevivem ao F5)
 
-# Inicialização da Memória (Session State)
-if "df_direto" not in st.session_state:
-    st.session_state["df_direto"] = None
-if "df_indireto" not in st.session_state:
-    st.session_state["df_indireto"] = None
-
-# ==========================================
-# BARRA LATERAL (SIDEBAR) & NAVEGAÇÃO
-# ==========================================
-st.sidebar.image("logo_feso.png", use_container_width=True)
-st.sidebar.title("Navegação")
-
-# Ordem invertida: Dashboard vem primeiro
-menu = st.sidebar.radio(
-    "Selecione a página:",
-    ["📊 Dashboard Principal", "📥 Gerenciar Dados"]
+st.set_page_config(page_title="Custos 2026", page_icon="📊", layout="wide")
+st.markdown(
+    """<style>
+    .block-container{padding-top:1.8rem;max-width:1600px}
+    [data-testid="stMetricValue"]{font-size:1.35rem}
+    [data-testid="stMetricLabel"] p{font-size:.8rem;opacity:.7}
+    h3{font-size:1rem!important;margin-bottom:.2rem}
+    </style>""",
+    unsafe_allow_html=True,
 )
 
-# ==========================================
-# TELA 1: DASHBOARD PRINCIPAL
-# ==========================================
-if menu == "📊 Dashboard Principal":  # Ajustado de elif para if
-    st.title("Dashboard de Custos 2026")
 
-    if st.session_state["df_direto"] is None or st.session_state["df_indireto"] is None:
-        st.warning("⚠️ Vá ao menu 'Gerenciar Dados' e carregue os dois arquivos para visualizar o dashboard.")
-    else:
-        # Prepara e une as bases para os filtros
-        df_dir = st.session_state["df_direto"].copy()
-        df_dir["Origem_Dado"] = "Direto"
-        
-        df_ind = st.session_state["df_indireto"].copy()
-        df_ind["Origem_Dado"] = "Rateio Recebido"
-        
-        df_full = pd.concat([df_dir, df_ind], ignore_index=True)
-
-        # 1. Filtros estilo "Pílulas"
-        col_f1, col_f2, col_f3 = st.columns([1, 2, 2])
-        with col_f1:
-            segmentos = st.multiselect("Segmento", sorted(df_full["Segmento"].dropna().unique()), default=df_full["Segmento"].dropna().unique())
-        with col_f2:
-            periodos = st.multiselect("Período", sorted(df_full["Período"].dropna().unique()), default=df_full["Período"].dropna().unique())
-        with col_f3:
-            classificacoes = st.multiselect("Classificação", sorted(df_full["Classificação"].dropna().unique()), default=df_full["Classificação"].dropna().unique())
-
-        # Aplica filtros globais
-        df_filtrado = df_full[
-            (df_full["Segmento"].isin(segmentos)) & 
-            (df_full["Período"].isin(periodos)) & 
-            (df_full["Classificação"].isin(classificacoes))
-        ]
-
-        # 2. KPIs de Topo
-        custo_dir = df_filtrado[df_filtrado["Origem_Dado"] == "Direto"]["Valor"].sum()
-        custo_ind = df_filtrado[df_filtrado["Origem_Dado"] == "Rateio Recebido"]["Valor"].sum()
-        custo_total = custo_dir + custo_ind
-        perc_indireto = (custo_ind / custo_total * 100) if custo_total > 0 else 0
-        
-        # Placeholder para "Rateado p/ outros" até termos a base de origem-destino
-        rateado_outros = 0.00 
-
-        st.markdown("---")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Custo direto", f"R$ {custo_dir:,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c2.metric("Rateio recebido", f"R$ {custo_ind:,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c3.metric("Custo total", f"R$ {custo_total:,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c4.metric("% indireto", f"{perc_indireto:.1f}%".replace(".", ","))
-        c5.metric("Rateado p/ outros", f"R$ {rateado_outros:,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        st.markdown("---")
-
-        # 3. Visões Estratégicas
-        col_view1, col_view2 = st.columns([1, 1])
-        
-        with col_view1:
-            st.markdown("### Visão por segmento")
-            # Tabela dinâmica replicando o HTML
-            df_seg = df_filtrado.groupby(["Segmento", "Origem_Dado"])["Valor"].sum().unstack(fill_value=0).reset_index()
-            # Garante que as colunas existam mesmo se o filtro excluir uma delas
-            if "Direto" not in df_seg.columns: df_seg["Direto"] = 0
-            if "Rateio Recebido" not in df_seg.columns: df_seg["Rateio Recebido"] = 0
-            
-            df_seg["Total"] = df_seg["Direto"] + df_seg["Rateio Recebido"]
-            df_seg["% indireto"] = (df_seg["Rateio Recebido"] / df_seg["Total"]) * 100
-            
-            # Formatação
-            df_seg_display = df_seg.copy()
-            for col in ["Direto", "Rateio Recebido", "Total"]:
-                df_seg_display[col] = df_seg_display[col].apply(lambda x: f"R$ {x:,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            df_seg_display["% indireto"] = df_seg_display["% indireto"].apply(lambda x: f"{x:.1f}%".replace(".", ","))
-            
-            st.dataframe(df_seg_display, use_container_width=True, hide_index=True)
-
-        with col_view2:
-            st.markdown("### Evolução mensal")
-            df_evolucao = df_filtrado.groupby(["Período", "Origem_Dado"])["Valor"].sum().reset_index()
-            
-            # Gráfico de barras empilhadas
-            fig_bar = px.bar(
-                df_evolucao, 
-                x="Período", 
-                y="Valor", 
-                color="Origem_Dado", 
-                barmode="stack",
-                color_discrete_map={"Direto": "#2f6fed", "Rateio Recebido": "#f79c42"}
-            )
-            fig_bar.update_layout(
-                xaxis_title="", 
-                yaxis_title="", 
-                legend_title="",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        st.markdown("---")
-        
-        # 4. Busca e Detalhamento de Centro de Custo
-        st.markdown("### Centros de Custo — Busca de Detalhes")
-        cc_selecionado = st.selectbox("Buscar centro de custo...", ["Selecione..."] + sorted(df_filtrado["Centro de Custo"].dropna().unique()))
-        
-        if cc_selecionado != "Selecione...":
-            df_cc = df_filtrado[df_filtrado["Centro de Custo"] == cc_selecionado]
-            st.dataframe(df_cc, use_container_width=True)
-            st.info("💡 Quando integrarmos a base de Rateios com Origem e Destino, renderizaremos aqui as tabelas de 'Rateio Recebido de' e 'Rateado para'.")
+# ======================================================================
+# Utilitários
+# ======================================================================
+def mostrar(func, *args, **kw):
+    """Chama um componente de largura total, compatível com versões novas (width='stretch') e antigas."""
+    if "width" not in inspect.signature(func).parameters:
+        return func(*args, use_container_width=True, **kw)
+    try:
+        return func(*args, width="stretch", **kw)
+    except (TypeError, st.errors.StreamlitAPIException):
+        return func(*args, use_container_width=True, **kw)
 
 
-# ==========================================
-# TELA 2: GERENCIAR DADOS (IMPORTAÇÃO E EXCLUSÃO)
-# ==========================================
-elif menu == "📥 Gerenciar Dados":
-    st.title("📥 Gerenciamento de Bases de Custos")
-    
-    # Sistema de Abas (Tabs)
-    tab1, tab2 = st.tabs(["Upload de Arquivos", "Visualizar & Excluir Bases"])
-    
-    # ABA 1: UPLOAD
+def chips(label, opcoes, padrao, key, fmt=str):
+    """Filtro estilo 'pílulas' (st.pills) com fallback para radio horizontal."""
+    if hasattr(st, "pills"):
+        v = st.pills(label, opcoes, default=padrao, format_func=fmt, key=key)
+        return padrao if v is None else v  # clicar na pílula ativa a desmarca -> volta ao padrão
+    return st.radio(label, opcoes, index=opcoes.index(padrao), format_func=fmt, key=key, horizontal=True)
+
+
+def tabela(df, fmt=None, altura=None, **kw):
+    obj = df.style.format(fmt) if fmt else df
+    if altura is None:
+        altura = min(36 * (len(df) + 1) + 3, 360)
+    return mostrar(st.dataframe, obj, hide_index=True, height=altura, **kw)
+
+
+def dash(v):  # R$ ou '–' quando zero
+    return cc.brl(v) if v else "–"
+
+
+@st.cache_data(show_spinner="Lendo planilha…")
+def ler_excel(conteudo: bytes) -> pd.DataFrame:
+    return pd.read_excel(io.BytesIO(conteudo))
+
+
+# ======================================================================
+# Estado e persistência
+# ======================================================================
+def _arq(tipo):
+    return DATA_DIR / f"{tipo}.pkl"
+
+
+def salvar_base(tipo, df):
+    DATA_DIR.mkdir(exist_ok=True)
+    df.to_pickle(_arq(tipo))
+
+
+def remover_base(tipo):
+    _arq(tipo).unlink(missing_ok=True)
+    st.session_state[f"df_{tipo}"] = None
+    atualizar_cadastro()
+
+
+def atualizar_cadastro():
+    d, i = st.session_state["df_direto"], st.session_state["df_indireto"]
+    if d is None or i is None:
+        st.session_state["cadastro"], st.session_state["avisos"] = None, []
+        return
+    cad = cc.montar_cadastro(d, i)
+    st.session_state["cadastro"] = cad
+    st.session_state["avisos"] = cc.diagnostico(d, i, cad)
+
+
+def iniciar_estado():
+    for tipo in ("direto", "indireto"):
+        if f"df_{tipo}" not in st.session_state:
+            st.session_state[f"df_{tipo}"] = pd.read_pickle(_arq(tipo)) if _arq(tipo).exists() else None
+    if "cadastro" not in st.session_state:
+        atualizar_cadastro()
+
+
+iniciar_estado()
+
+
+# ======================================================================
+# Gráficos
+# ======================================================================
+def _estilo(fig, altura):
+    fig.update_layout(
+        height=altura, margin=dict(l=0, r=0, t=10, b=0), separators=",.",
+        legend=dict(orientation="h", y=1.15, x=1, xanchor="right", title_text=""),
+        xaxis_title=None, yaxis_title=None,
+    )
+    return fig
+
+
+def grafico_evolucao(serie, com_rateado):
+    x = [cc.rotulo_periodo(p) for p in serie["periodo"]]
+    fig = go.Figure()
+    fig.add_bar(x=x, y=serie["direto"], name="Direto", marker_color=COR_DIRETO, hovertemplate="%{y:,.0f}")
+    fig.add_bar(x=x, y=serie["recebido"], name="Rateio recebido", marker_color=COR_RATEIO, hovertemplate="%{y:,.0f}")
+    fig.update_layout(barmode="stack")
+    if com_rateado:
+        fig.add_scatter(x=x, y=serie["rateado"], name="Rateado p/ outros", mode="lines+markers",
+                        line=dict(color=COR_RATEADO, shape="spline"), hovertemplate="%{y:,.0f}")
+    fig.update_yaxes(tickformat=".3~s")
+    return _estilo(fig, 260)
+
+
+def grafico_grupos(g):
+    fig = go.Figure(go.Bar(x=g["valor"], y=g["grupo"], orientation="h", marker_color=COR_GRUPO, hovertemplate="%{x:,.0f}"))
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(tickformat=".3~s")
+    return _estilo(fig, max(140, len(g) * 28 + 50))
+
+
+# ======================================================================
+# Blocos do detalhe
+# ======================================================================
+def bloco_fluxo(df, titulo_setor, absorvido=None):
+    """df: colunas cc_nome, classificacao, segmento, valor (já ordenado)."""
+    total = df["valor"].sum()
+    por_seg = df.groupby("segmento")["valor"].sum().sort_values(ascending=False).reset_index()
+    st.caption(" · ".join(f"{k}: {cc.brl(v)}" for k, v in
+                          df.groupby("classificacao")["valor"].sum().sort_values(ascending=False).items()))
+    st.markdown("**Por segmento**")
+    tabela(pd.DataFrame({"Segmento": por_seg["segmento"], "Valor": por_seg["valor"],
+                         "%": [cc.pct(v, total) for v in por_seg["valor"]]}), {"Valor": cc.brl})
+    st.markdown(f"**{titulo_setor}**")
+    t = pd.DataFrame({titulo_setor: df["cc_nome"], "Classificação": df["classificacao"], "Segmento": df["segmento"],
+                      "Valor": df["valor"], "% do total": [cc.pct(v, total) for v in df["valor"]]})
+    fmt = {"Valor": cc.brl}
+    if absorvido is not None:
+        tot_origem = df["cc_id"].map(absorvido)
+        t["Total rateado pela origem"] = tot_origem
+        t["% absorvido da origem"] = [cc.pct(v, o) for v, o in zip(df["valor"], tot_origem)]
+        fmt["Total rateado pela origem"] = cc.brl
+    tabela(t, fmt, altura=min(36 * (len(t) + 1) + 3, 320))
+
+
+def painel_detalhe(cc_id, res_all, d, i, cad, periodos, todos, com_origem):
+    if cc_id is None:
+        with st.container(border=True):
+            st.markdown("### Detalhe do centro de custo")
+            st.caption("Selecione um centro na tabela (clique na linha) para ver a evolução mensal, a composição "
+                       "dos custos diretos e, para centros Administrativos/Apoio, para quais setores o custo foi rateado.")
+        return
+
+    c = cad[cad["cc_id"] == cc_id].iloc[0]
+    r = res_all[res_all["cc_id"] == cc_id].iloc[0]
+    rateia = c["classificacao"] != "Produtivo" and com_origem
+
+    with st.container(border=True):
+        st.markdown(f"### {c['cc_nome']}")
+        st.caption(f"{c['classificacao']} · {c['segmento']} · {cc_id}")
+        cols = st.columns(4 if rateia else 3)
+        cols[0].metric("Direto", cc.brl(r["direto"]))
+        cols[1].metric("Rateio recebido", cc.brl(r["recebido"]))
+        cols[2].metric("Custo total", cc.brl(r["total"]))
+        if rateia:
+            cols[3].metric("Rateado p/ outros", cc.brl(r["rateado"]))
+
+    with st.container(border=True):
+        st.markdown("### Evolução mensal")
+        mostrar(st.plotly_chart, grafico_evolucao(cc.serie_mensal(d, i, cc_id, todos), rateia))
+
+    g = cc.direto_por_grupo(d, cc_id, periodos)
+    if not g.empty:
+        with st.container(border=True):
+            st.markdown("### Custo direto por grupo de conta")
+            mostrar(st.plotly_chart, grafico_grupos(g))
+
+    if rateia:
+        with st.container(border=True):
+            st.markdown("### Para quem o custo foi rateado")
+            dest = cc.fluxo_do_centro(i, cad, cc_id, periodos, "destino")
+            if dest.empty:
+                st.caption("Sem movimentação no período.")
+            else:
+                bloco_fluxo(dest, "Setor de destino")
+
+    if com_origem:
+        org = cc.fluxo_do_centro(i, cad, cc_id, periodos, "origem")
+        if not org.empty:
+            with st.container(border=True):
+                st.markdown("### Rateio recebido de")
+                bloco_fluxo(org, "Setor de origem", absorvido=cc.total_rateado_pela_origem(i, periodos))
+                st.caption("% absorvido da origem = parcela do total que a origem rateou no período que veio para este setor.")
+
+
+# ======================================================================
+# Blocos da visão geral
+# ======================================================================
+def bloco_segmentos(L, i, cad, periodos, com_origem):
+    seg = cc.resumo_segmentos(L)
+    with st.container(border=True):
+        st.markdown("### Visão por segmento")
+        t = pd.DataFrame({
+            "Segmento": seg["segmento"], "Direto": seg["direto"], "Rateio recebido": seg["recebido"],
+            "Total": seg["total"], "% indireto": [cc.pct(r, t) for r, t in zip(seg["recebido"], seg["total"])],
+            "Rateado p/ outros": seg["rateado"],
+        })
+        tabela(t, {"Direto": cc.brl, "Rateio recebido": cc.brl, "Total": cc.brl, "Rateado p/ outros": dash})
+
+        if not com_origem:
+            return
+        mx = cc.matriz_segmentos(i, cad, set(L["cc_id"]), periodos)
+        if mx.empty:
+            return
+        st.markdown("### Rateio entre segmentos")
+        st.caption("Origem (linha) → destino (coluna), % da origem")
+        tot = mx.sum(axis=1)
+        disp = pd.DataFrame(index=mx.index, columns=mx.columns, dtype=object)
+        for a in mx.index:
+            for b in mx.columns:
+                v = mx.loc[a, b]
+                disp.loc[a, b] = f"{cc.brl(v)} ({cc.pct(v, tot[a])})" if v else "–"
+        disp["Total rateado"] = tot.map(cc.brl)
+        disp.index.name = "Origem \\ Destino"
+
+        def sombra(_):  # intensidade proporcional à % da origem, como no HTML
+            est = pd.DataFrame("", index=disp.index, columns=disp.columns)
+            for a in mx.index:
+                for b in mx.columns:
+                    p = mx.loc[a, b] / tot[a] if tot[a] else 0
+                    est.loc[a, b] = f"background-color: rgba(47,111,237,{p * 0.45:.2f})"
+            return est
+
+        mostrar(st.dataframe, disp.style.apply(sombra, axis=None), height=min(36 * (len(disp) + 1) + 3, 360))
+
+
+def bloco_centros(L):
+    """Tabela de centros; devolve o cc_id da linha selecionada (ou None)."""
+    T = L.sort_values("total", ascending=False).reset_index(drop=True)
+    with st.container(border=True):
+        st.markdown("### Centros de custo — clique na linha para detalhar")
+        vis = pd.DataFrame({
+            "Centro de custo": T["cc_nome"], "Classificação": T["classificacao"], "Segmento": T["segmento"],
+            "Direto": T["direto"], "Rateio recebido": T["recebido"], "Total": T["total"],
+            "Rateado p/ outros": T["rateado"],
+        })
+        evento = mostrar(
+            st.dataframe,
+            vis.style.format({"Direto": cc.brl, "Rateio recebido": cc.brl, "Total": cc.brl, "Rateado p/ outros": dash}),
+            hide_index=True, height=560, on_select="rerun", selection_mode="single-row", key="tbl_centros",
+        )
+        st.caption("Custo total = custo direto + rateio recebido. “Rateado p/ outros” é o que o centro distribuiu "
+                   "(apenas Administrativo/Apoio/Neutro). Clique no cabeçalho para ordenar.")
+    linhas = evento.selection.rows if evento is not None else []
+    # a checagem evita erro se a seleção ficar "velha" depois de mudar um filtro
+    return T["cc_id"].iloc[linhas[0]] if linhas and linhas[0] < len(T) else None
+
+
+# ======================================================================
+# PÁGINA 1: DASHBOARD
+# ======================================================================
+def pagina_dashboard():
+    st.title("Custos 2026")
+    d, i, cad = st.session_state["df_direto"], st.session_state["df_indireto"], st.session_state["cadastro"]
+    if d is None or i is None:
+        st.warning("⚠️ Vá ao menu 'Gerenciar Dados' e carregue as duas bases (direta e indireta) para ver o dashboard.")
+        return
+    if st.session_state["avisos"]:
+        with st.expander("⚠️ Avisos sobre as bases carregadas"):
+            for a in st.session_state["avisos"]:
+                st.write("• " + a)
+
+    com_origem = cc.tem_origem(i)
+    todos = cc.periodos_disponiveis(d, i)
+
+    # ---- Filtros (pílulas) ----
+    sel_p = chips("Período", ["__todos__"] + todos, "__todos__", "f_per",
+                  lambda p: "Ano todo" if p == "__todos__" else cc.rotulo_periodo(p))
+    periodos = todos if sel_p == "__todos__" else [sel_p]
+
+    existentes = set(cad["classificacao"])
+    classifs = ["Todos"] + [c for c in cc.ORDEM_CLASSIF if c in existentes] + sorted(existentes - set(cc.ORDEM_CLASSIF))
+    f1, f2, f3 = st.columns([2.2, 3, 2])
+    with f1:
+        sel_c = chips("Classificação", classifs, "Todos", "f_cls")
+    with f2:
+        sel_s = chips("Segmento", ["Todos"] + sorted(cad["segmento"].unique()), "Todos", "f_seg")
+    with f3:
+        busca = st.text_input("Buscar", placeholder="Buscar centro de custo…", label_visibility="collapsed")
+
+    # ---- Dados filtrados ----
+    res_all = cc.resumo_centros(d, i, cad, periodos)
+    L = cc.filtrar_centros(res_all, sel_c, sel_s, busca)
+    k = cc.kpis(L)
+
+    faixa = "Ano todo" if sel_p == "__todos__" else cc.rotulo_periodo(sel_p)
+    if sel_p == "__todos__":
+        faixa = f"{cc.rotulo_periodo(todos[0])[:3]}–{cc.rotulo_periodo(todos[-1])}"
+    sem_rateio = [cc.rotulo_periodo(p) for p in periodos if p not in set(i["periodo"])]
+    nota = f" · {', '.join(sem_rateio)} só tem custo direto (sem rateio)" if sem_rateio else ""
+    st.caption(f"{faixa} · {len(L)} centros{nota}")
+
+    # ---- KPIs ----
+    cols = st.columns(5)
+    for col, (rot, val) in zip(cols, [
+        ("Custo direto", cc.brl(k["direto"])), ("Rateio recebido", cc.brl(k["recebido"])),
+        ("Custo total", cc.brl(k["total"])), ("% indireto", f"{k['pct_indireto']:.1f}%".replace(".", ",")),
+        ("Rateado p/ outros", cc.brl(k["rateado"])),
+    ]):
+        with col.container(border=True):
+            st.metric(rot, val)
+
+    if L.empty:
+        st.info("Nenhum centro de custo com movimentação para os filtros escolhidos.")
+        return
+
+    # ---- Corpo: visão geral (esq.) + detalhe (dir.) ----
+    esq, dir_ = st.columns([1.15, 1], gap="medium")
+    with esq:
+        bloco_segmentos(L, i, cad, periodos, com_origem)
+        sel_id = bloco_centros(L)
+    with dir_:
+        painel_detalhe(sel_id, res_all, d, i, cad, periodos, todos, com_origem)
+
+
+# ======================================================================
+# PÁGINA 2: GERENCIAR DADOS
+# ======================================================================
+def bloco_upload(tipo, titulo, campos, normalizar):
+    st.subheader(titulo)
+    arq = st.file_uploader(f"Planilha (.xlsx) — {titulo.lower()}", type=["xlsx"], key=f"up_{tipo}")
+    if arq is None:
+        return
+    raw = ler_excel(arq.getvalue())
+    auto = cc.auto_mapear(raw.columns, campos)
+    faltando = [rot for ch, rot, obr, _ in campos if obr and not auto[ch]]
+
+    opcoes = ["— não usar —"] + [str(c) for c in raw.columns]
+    mapa = {}
+    with st.expander("Mapeamento de colunas (campos com * são obrigatórios)", expanded=bool(faltando)):
+        for ch, rot, obr, _ in campos:
+            padrao = opcoes.index(str(auto[ch])) if auto[ch] is not None else 0
+            esc = st.selectbox(rot + (" *" if obr else ""), opcoes, index=padrao, key=f"map_{tipo}_{ch}_{arq.name}")
+            mapa[ch] = None if esc == opcoes[0] else esc
+
+    ainda = [rot for ch, rot, obr, _ in campos if obr and not mapa[ch]]
+    if ainda:
+        st.error("Faltam colunas obrigatórias: " + ", ".join(ainda))
+        return
+    st.caption(f"{len(raw):,} linhas lidas.".replace(",", "."))
+    if st.button("Carregar base", key=f"btn_{tipo}", type="primary"):
+        df = normalizar(raw, mapa)
+        if df.empty:
+            st.error("Nenhuma linha válida após a leitura. Confira Período, Valor e o mapeamento.")
+            return
+        st.session_state[f"df_{tipo}"] = df
+        salvar_base(tipo, df)
+        atualizar_cadastro()
+        st.success(f"✅ {len(df):,} linhas carregadas.".replace(",", "."))
+
+
+def bloco_base(tipo, titulo):
+    st.subheader(titulo)
+    df = st.session_state[f"df_{tipo}"]
+    if df is None:
+        st.info("Nenhuma base carregada.")
+        return
+    ps = sorted(df["periodo"].unique())
+    st.caption(f"{len(df):,} linhas · {cc.rotulo_periodo(ps[0])} a {cc.rotulo_periodo(ps[-1])} · "
+               f"total {cc.brl(df['valor'].sum())}".replace(",", "."))
+    mostrar(st.dataframe, df.head(10))
+    if st.button("🗑️ Excluir esta base", key=f"del_{tipo}"):
+        remover_base(tipo)
+        st.rerun()
+
+
+def pagina_dados():
+    st.title("📥 Gerenciamento de bases de custos")
+    tab1, tab2 = st.tabs(["Upload de arquivos", "Visualizar & excluir bases"])
+
     with tab1:
-        st.markdown("Faça o upload dos arquivos extraídos do sistema.")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Custos Diretos")
-            arquivo_direto = st.file_uploader("Base de Custos Diretos (.xlsx)", type=["xlsx"], key="direto")
-            if arquivo_direto:
-                st.session_state["df_direto"] = processar_excel(arquivo_direto)
-                st.success("✅ Custos Diretos carregados na memória!")
-
-        with col2:
-            st.subheader("Custos Indiretos (Rateios)")
-            arquivo_indireto = st.file_uploader("Base de Custos Indiretos (.xlsx)", type=["xlsx"], key="indireto")
-            if arquivo_indireto:
-                st.session_state["df_indireto"] = processar_excel(arquivo_indireto)
-                st.success("✅ Custos Indiretos carregados na memória!")
-
-    # ABA 2: GERENCIAMENTO DAS BASES CARREGADAS
-    with tab2:
-        st.markdown("Verifique os dados em memória ou exclua uma base específica caso tenha importado o arquivo errado.")
-        
+        st.markdown("Faça o upload das planilhas extraídas do sistema. As colunas são detectadas automaticamente; "
+                    "confira o mapeamento antes de carregar.")
+        st.caption("Base indireta: para ter 'Rateado p/ outros', matriz entre segmentos e 'Rateio recebido de', "
+                   "ela precisa trazer o centro de **origem** e o de **destino** de cada rateio.")
         c1, c2 = st.columns(2)
-        
         with c1:
-            st.subheader("Base Direta")
-            if st.session_state["df_direto"] is not None:
-                st.dataframe(st.session_state["df_direto"].head(10), use_container_width=True)
-                if st.button("🗑️ Excluir Base Direta"):
-                    st.session_state["df_direto"] = None
-                    st.rerun()
-            else:
-                st.info("Nenhuma base direta carregada.")
-                
+            bloco_upload("direto", "Custos diretos", cc.CAMPOS_DIRETO, cc.normalizar_direto)
         with c2:
-            st.subheader("Base Indireta (Rateio)")
-            if st.session_state["df_indireto"] is not None:
-                st.dataframe(st.session_state["df_indireto"].head(10), use_container_width=True)
-                if st.button("🗑️ Excluir Base Indireta"):
-                    st.session_state["df_indireto"] = None
-                    st.rerun()
-            else:
-                st.info("Nenhuma base indireta carregada.")
-        
+            bloco_upload("indireto", "Custos indiretos (rateios)", cc.CAMPOS_INDIRETO, cc.normalizar_indireto)
+
+    with tab2:
+        st.markdown("Confira os dados carregados ou exclua uma base caso tenha importado o arquivo errado.")
+        c1, c2 = st.columns(2)
+        with c1:
+            bloco_base("direto", "Base direta")
+        with c2:
+            bloco_base("indireto", "Base indireta (rateio)")
         st.markdown("---")
-        if st.button("🚨 Limpar Todas as Bases (Esvaziar Memória)"):
-            st.cache_data.clear()
-            st.session_state["df_direto"] = None
-            st.session_state["df_indireto"] = None
+        if st.button("🚨 Limpar todas as bases"):
+            ler_excel.clear()
+            for tipo in ("direto", "indireto"):
+                _arq(tipo).unlink(missing_ok=True)
+                st.session_state[f"df_{tipo}"] = None
+            atualizar_cadastro()
             st.rerun()
+
+
+# ======================================================================
+# Navegação
+# ======================================================================
+logo = Path(__file__).parent / "logo_feso.png"
+if logo.exists():
+    mostrar(st.sidebar.image, str(logo))
+st.sidebar.title("Navegação")
+menu = st.sidebar.radio("Selecione a página:", ["📊 Dashboard Principal", "📥 Gerenciar Dados"])
+
+if menu == "📊 Dashboard Principal":
+    pagina_dashboard()
+else:
+    pagina_dados()
