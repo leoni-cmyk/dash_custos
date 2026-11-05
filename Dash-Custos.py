@@ -87,7 +87,7 @@ def grafico_evolucao(serie, com_rateado):
     fig.update_layout(
         height=280,
         margin=dict(l=10, r=10, t=25, b=10),
-        separators=".,",
+        separators=",.", # AJUSTE FINO: Padrão pt-BR no Plotly (Vírgula para decimal, ponto milhar)
         hovermode="x unified",
         hoverlabel=dict(
             bgcolor="rgba(25, 28, 36, 0.95)",
@@ -109,7 +109,7 @@ def grafico_grupos(g):
     fig.update_layout(
         height=max(140, len(g) * 28 + 50),
         margin=dict(l=0, r=10, t=10, b=10),
-        separators=".,",
+        separators=",.", # AJUSTE FINO: Padrão pt-BR no Plotly (Vírgula para decimal, ponto milhar)
         hoverlabel=dict(
             bgcolor="rgba(25, 28, 36, 0.95)",
             font_size=13,
@@ -315,11 +315,13 @@ def pagina_relatorio():
         st.markdown(f"## {info['cc_nome']}")
         st.caption(f"Código: {cc_id} | Classificação: {info['classificacao']} | Segmento: {info['segmento']}")
     
+    # Processamento dos Dados do Relatório
     pv_dir = cc.relatorio_direto_pivot(d, cc_id, ano_sel, mes_limite=mes_limite)
     pv_seg, detalhes_seg = cc.relatorio_indireto_por_segmento(i, cc_id, ano_sel, mes_limite=mes_limite)
+    pv_tot = cc.relatorio_total_pivot(pv_dir, pv_seg, mes_limite=mes_limite) # AJUSTE FINO: Custo Total
     
     with col_pdf:
-        pdf_bytes = cc.gerar_pdf_relatorio(info, pv_dir, pv_seg, detalhes_seg, ano_sel, mes_limite)
+        pdf_bytes = cc.gerar_pdf_relatorio(info, pv_dir, pv_seg, detalhes_seg, pv_tot, ano_sel, mes_limite)
         if pdf_bytes:
             st.download_button(
                 label="📄 Baixar PDF",
@@ -342,22 +344,33 @@ def pagina_relatorio():
         
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # 2. Resumo e Drill-Down do Rateio Recebido por Segmento
+    # 2. Resumo do Rateio Recebido por Segmento
     st.subheader(f"2. Origens do Custo Indireto - Rateio Recebido (Acumulado até Mês {mes_limite:02d})")
-    
     if pv_seg.empty:
         st.caption("Este centro não recebeu rateios indiretos neste ano.")
     else:
-        st.markdown("#### 🏢 Resumo por Segmento de Origem")
         fmt_seg = {col: cc.brl for col in pv_seg.columns}
         st.dataframe(pv_seg.style.format(fmt_seg), use_container_width=True, height=min(38 * (len(pv_seg) + 1) + 3, 300))
         
-        st.markdown("#### 🔍 Detalhamento (Drill-Down por Centro de Custo)")
-        for seg_nome, pv_sub in detalhes_seg.items():
-            tot_seg_val = pv_sub.loc[f"TOTAL {seg_nome.upper()}", "TOTAL"] if f"TOTAL {seg_nome.upper()}" in pv_sub.index else 0.0
-            with st.expander(f"📌 Rateio vindo do Segmento: **{seg_nome}** — Total Absorvido: **{cc.brl(tot_seg_val)}**"):
-                fmt_sub = {col: cc.brl for col in pv_sub.columns}
-                st.dataframe(pv_sub.style.format(fmt_sub), use_container_width=True, height=min(38 * (len(pv_sub) + 1) + 3, 400))
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 3. Custo Total Consolidado (AJUSTE FINO NOVO)
+    st.subheader(f"3. Custo Total do Centro (Direto + Indireto - Acumulado até Mês {mes_limite:02d})")
+    if not pv_tot.empty:
+        fmt_tot = {col: cc.brl for col in pv_tot.columns}
+        st.dataframe(pv_tot.style.format(fmt_tot), use_container_width=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # 4. Detalhamento (Drill-Down)
+    st.markdown("#### 4. Detalhamento por Centro de Custo de Origem")
+    if not detalhes_seg:
+         st.caption("Nenhum detalhamento de rateio para exibir.")
+    for seg_nome, pv_sub in detalhes_seg.items():
+        tot_seg_val = pv_sub.loc[f"TOTAL {seg_nome.upper()}", "TOTAL"] if f"TOTAL {seg_nome.upper()}" in pv_sub.index else 0.0
+        with st.expander(f"📌 Rateio vindo do Segmento: **{seg_nome}** — Total Absorvido: **{cc.brl(tot_seg_val)}**"):
+            fmt_sub = {col: cc.brl for col in pv_sub.columns}
+            st.dataframe(pv_sub.style.format(fmt_sub), use_container_width=True, height=min(38 * (len(pv_sub) + 1) + 3, 400))
 
 def bloco_upload(tipo, titulo, campos, normalizar):
     st.subheader(titulo)
@@ -386,23 +399,35 @@ def bloco_upload(tipo, titulo, campos, normalizar):
 
 def bloco_base(tipo, titulo):
     st.subheader(titulo)
-    df = st.session_state[f"df_{tipo}"]
-    if df is None: return st.info("Nenhuma base carregada.")
-    st.caption(f"{len(df):,} linhas · Total {cc.brl(df['valor'].sum())}")
-    mostrar(st.dataframe, df.head(10))
-    if st.button("🗑️ Excluir esta base", key=f"del_{tipo}"): remover_base(tipo); st.rerun()
+    df = st.session_state.get(f"df_{tipo}")
+    
+    if df is None: 
+        return st.info("Nenhuma base carregada no momento.")
+    
+    # AJUSTE FINO: Visão limpa e objetiva das bases importadas (Sem carregar a tabela inteira)
+    st.success(f"Arquivo carregado com sucesso.")
+    c1, c2 = st.columns(2)
+    c1.metric("Linhas Processadas", f"{len(df):,}".replace(",", "."))
+    c2.metric("Valor Total da Base", cc.brl(df['valor'].sum()))
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button(f"🗑️ Excluir base '{titulo.lower()}'", key=f"del_{tipo}", type="primary", use_container_width=True): 
+        remover_base(tipo)
+        st.rerun()
 
 def pagina_dados():
     st.title("📥 Gerenciamento de bases de custos")
-    t1, t2 = st.tabs(["Upload de arquivos", "Visualizar & excluir bases"])
+    t1, t2 = st.tabs(["Upload de arquivos", "Visualizar & Excluir Bases Carregadas"])
     with t1:
         c1, c2 = st.columns(2)
         with c1: bloco_upload("direto", "Custos diretos", cc.CAMPOS_DIRETO, cc.normalizar_direto)
         with c2: bloco_upload("indireto", "Custos indiretos (rateios)", cc.CAMPOS_INDIRETO, cc.normalizar_indireto)
     with t2:
         c1, c2 = st.columns(2)
-        with c1: bloco_base("direto", "Base direta")
-        with c2: bloco_base("indireto", "Base indireta")
+        with c1: 
+            with st.container(border=True): bloco_base("direto", "Base Direta")
+        with c2: 
+            with st.container(border=True): bloco_base("indireto", "Base Indireta")
 
 # ======================================================================
 # Navegação
