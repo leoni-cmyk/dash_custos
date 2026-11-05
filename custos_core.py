@@ -303,19 +303,25 @@ def relatorio_indireto_por_segmento(indireto, cc_id, ano_selecionado, mes_limite
     ii["origem_segmento"] = ii["origem_segmento"].fillna("Sem Segmento")
     cols_limite = [f"{m:02d}" for m in range(1, mes_limite + 1)]
     
+    # 1. Agrupar por segmento primeiro
     pv_seg = ii.pivot_table(index="origem_segmento", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
     pv_seg = pv_seg.reindex(columns=cols_meses, fill_value=0.0)
     pv_seg["TOTAL"] = pv_seg[cols_limite].sum(axis=1)
     pv_seg["MÉDIA"] = pv_seg["TOTAL"] / max(1, mes_limite)
     pv_seg = pv_seg.sort_values("TOTAL", ascending=False)
+    
+    # AJUSTE FINO: Salvar a ordem dos segmentos (do maior rateio pro menor) antes de incluir a linha TOTAL
+    segmentos_ordenados = pv_seg.index.tolist()
+    
     pv_seg.loc["TOTAL RATEIO RECEBIDO"] = pv_seg.sum(numeric_only=True)
     pv_seg.index.name = "Segmento de Origem"
     
     detalhes_por_seg = {}
-    for seg in sorted(ii["origem_segmento"].unique()):
+    # Iterar seguindo a ordem do maior ofensor pro menor
+    for seg in segmentos_ordenados:
         sub = ii[ii["origem_segmento"] == seg].copy()
         
-        # AJUSTE FINO: Mostramos apenas o NOME do centro para nao embolar os relatórios
+        # Mostramos apenas o NOME do centro para nao embolar os relatórios
         sub["origem_rotulo"] = sub["origem_nome"].fillna(sub["origem_id"])
         
         pv_sub = sub.pivot_table(index="origem_rotulo", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
@@ -325,12 +331,12 @@ def relatorio_indireto_por_segmento(indireto, cc_id, ano_selecionado, mes_limite
         pv_sub = pv_sub.sort_values("TOTAL", ascending=False)
         pv_sub.loc[f"TOTAL {seg.upper()}"] = pv_sub.sum(numeric_only=True)
         pv_sub.index.name = "Centro de Custo de Origem"
+        
         detalhes_por_seg[seg] = pv_sub
         
     return pv_seg, detalhes_por_seg
 
 def relatorio_total_pivot(pv_dir, pv_seg, mes_limite=12):
-    # AJUSTE FINO: Consolidação do Custo Total
     cols_meses = [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
     df_tot = pd.DataFrame(0.0, index=["1. Custo Direto", "2. Rateio Recebido", "3. Custo Total"], columns=cols_meses)
     
@@ -369,8 +375,15 @@ def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, pv_tot, ano_sel,
     section_style = ParagraphStyle('SectionStyle', parent=styles['Heading2'], fontSize=10.5, leading=14, textColor=colors.HexColor('#1E40AF'), spaceBefore=8, spaceAfter=4)
     subsec_style = ParagraphStyle('SubSectionStyle', parent=styles['Heading3'], fontSize=9, leading=12, textColor=colors.HexColor('#0F172A'), spaceBefore=6, spaceAfter=2)
     
-    # AJUSTE FINO: Estilo especial para nomes longos na tabela (Word-wrap - quebra de texto automatica)
-    cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontSize=6.5, leading=7.5, fontName='Helvetica-Bold', textColor=colors.HexColor('#334155'))
+    # AJUSTE FINO: Estilo da fonte corrigido para ficar idêntico ao restante da tabela (sem negrito e cor preta)
+    cell_style = ParagraphStyle(
+        'CellStyle', 
+        parent=styles['Normal'], 
+        fontSize=7, 
+        leading=8, 
+        fontName='Helvetica', 
+        textColor=colors.black
+    )
 
     elements = []
     elements.append(Paragraph(f"<b>RELATÓRIO GERENCIAL CONSOLIDADO DE CUSTOS — {ano_sel}</b>", title_style))
@@ -395,7 +408,7 @@ def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, pv_tot, ano_sel,
         for idx, row in df_tabela.iterrows():
             idx_str = str(idx)
             
-            # Quebra automática do nome se for muito longo (mais de 30 caracteres)
+            # Aplica o ParagraphStyle normal (sem negrito) apenas para nomes longos
             if wrap_index and len(idx_str) > 30 and not idx_str.startswith("TOTAL"):
                 idx_display = Paragraph(idx_str, cell_style)
             else:
@@ -411,7 +424,7 @@ def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, pv_tot, ano_sel,
             ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
             ('FONTSIZE', (0,0), (-1,-1), 7),
             ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), # Garante alinhamento vertical correto para textos quebrados
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), # Garante alinhamento vertical para textos quebrados
             ('BOTTOMPADDING', (0,0), (-1,-1), 2.5),
             ('TOPPADDING', (0,0), (-1,-1), 2.5),
             ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
@@ -436,7 +449,7 @@ def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, pv_tot, ano_sel,
     elements.append(Paragraph(f"3. Custo Total do Centro (Direto + Indireto em R$)", section_style))
     if not pv_tot.empty:
         t_tot = criar_tabela_pdf(pv_tot)
-        t_tot.setStyle(TableStyle([('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#DBEAFE'))])) # Destaca a linha do Total
+        t_tot.setStyle(TableStyle([('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#DBEAFE'))])) 
         elements.append(t_tot)
 
     # 4. Detalhamento
