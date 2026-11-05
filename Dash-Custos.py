@@ -42,7 +42,7 @@ def dash(v): return cc.brl(v) if v else "–"
 def ler_excel(conteudo: bytes) -> pd.DataFrame: return pd.read_excel(io.BytesIO(conteudo))
 
 # ======================================================================
-# Estado e persistência
+# Estado e Persistência
 # ======================================================================
 def _arq(tipo): return DATA_DIR / f"{tipo}.pkl"
 def salvar_base(tipo, df): DATA_DIR.mkdir(exist_ok=True); df.to_pickle(_arq(tipo))
@@ -64,26 +64,60 @@ def iniciar_estado():
 iniciar_estado()
 
 # ======================================================================
-# Blocos Visuais do Dashboard
+# Visualizações Gráficas com Hover Formatado
 # ======================================================================
-def _estilo(fig, altura):
-    fig.update_layout(height=altura, margin=dict(l=0, r=0, t=10, b=0), separators=",.",
-                      legend=dict(orientation="h", y=1.15, x=1, xanchor="right", title_text=""))
-    return fig
-
 def grafico_evolucao(serie, com_rateado):
     x = [cc.rotulo_periodo(p) for p in serie["periodo"]]
     fig = go.Figure()
-    fig.add_bar(x=x, y=serie["direto"], name="Direto", marker_color=COR_DIRETO, hovertemplate="%{y:,.0f}")
-    fig.add_bar(x=x, y=serie["recebido"], name="Rateio recebido", marker_color=COR_RATEIO, hovertemplate="%{y:,.0f}")
+    fig.add_bar(
+        x=x, y=serie["direto"], name="Direto", marker_color=COR_DIRETO,
+        hovertemplate="<b>Direto</b>: R$ %{y:,.0f}<extra></extra>"
+    )
+    fig.add_bar(
+        x=x, y=serie["recebido"], name="Rateio recebido", marker_color=COR_RATEIO,
+        hovertemplate="<b>Rateio recebido</b>: R$ %{y:,.0f}<extra></extra>"
+    )
     fig.update_layout(barmode="stack")
-    if com_rateado: fig.add_scatter(x=x, y=serie["rateado"], name="Rateado p/ outros", mode="lines+markers", line=dict(color=COR_RATEADO))
-    return _estilo(fig, 260)
+    if com_rateado:
+        fig.add_scatter(
+            x=x, y=serie["rateado"], name="Rateado p/ outros", mode="lines+markers",
+            line=dict(color=COR_RATEADO, width=2.5),
+            hovertemplate="<b>Rateado</b>: R$ %{y:,.0f}<extra></extra>"
+        )
+    fig.update_layout(
+        height=280,
+        margin=dict(l=10, r=10, t=25, b=10),
+        separators=".,",
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor="rgba(25, 28, 36, 0.95)",
+            font_size=13,
+            font_family="Segoe UI, sans-serif",
+            font_color="#ffffff",
+            bordercolor="rgba(255,255,255,0.15)"
+        ),
+        legend=dict(orientation="h", y=1.18, x=1, xanchor="right", title_text="")
+    )
+    return fig
 
 def grafico_grupos(g):
-    fig = go.Figure(go.Bar(x=g["valor"], y=g["grupo"], orientation="h", marker_color=COR_GRUPO, hovertemplate="%{x:,.0f}"))
+    fig = go.Figure(go.Bar(
+        x=g["valor"], y=g["grupo"], orientation="h", marker_color=COR_GRUPO,
+        hovertemplate="<b>%{y}</b>: R$ %{x:,.0f}<extra></extra>"
+    ))
     fig.update_yaxes(autorange="reversed")
-    return _estilo(fig, max(140, len(g) * 28 + 50))
+    fig.update_layout(
+        height=max(140, len(g) * 28 + 50),
+        margin=dict(l=0, r=10, t=10, b=10),
+        separators=".,",
+        hoverlabel=dict(
+            bgcolor="rgba(25, 28, 36, 0.95)",
+            font_size=13,
+            font_family="Segoe UI, sans-serif",
+            font_color="#ffffff"
+        )
+    )
+    return fig
 
 def bloco_fluxo(df, titulo_setor, absorvido=None):
     total = df["valor"].sum()
@@ -136,11 +170,11 @@ def painel_detalhe(cc_id, res_all, d, i, cad, periodos, todos, com_origem):
                 bloco_fluxo(org, "Setor de origem", absorvido=cc.total_rateado_pela_origem(i, periodos))
 
 def bloco_segmentos(L, i, cad, periodos, com_origem):
-    seg = cc.resumo_segmentos(L)
+    seg = cc.resumo_segmentos(L, i, periodos)
     with st.container(border=True):
-        st.markdown("### Visão por segmento")
-        t = pd.DataFrame({"Segmento": seg["segmento"], "Direto": seg["direto"], "Recebido": seg["recebido"], "Total": seg["total"], "Rateado": seg["rateado"]})
-        tabela(t, {"Direto": cc.brl, "Recebido": cc.brl, "Total": cc.brl, "Rateado": dash})
+        st.markdown("### Visão por segmento (custos externos absorvidos)")
+        t = pd.DataFrame({"Segmento": seg["segmento"], "Direto": seg["direto"], "Recebido (Inter)": seg["recebido"], "Total": seg["total"], "Rateado (Inter)": seg["rateado"]})
+        tabela(t, {"Direto": cc.brl, "Recebido (Inter)": cc.brl, "Total": cc.brl, "Rateado (Inter)": dash})
 
         if not com_origem: return
         mx = cc.matriz_segmentos(i, cad, set(L["cc_id"]), periodos)
@@ -169,7 +203,6 @@ def bloco_centros(L):
         st.markdown("### Centros de custo — clique para detalhar")
         vis = pd.DataFrame({"Centro de custo": T["cc_nome"], "Classificação": T["classificacao"], "Segmento": T["segmento"], "Direto": T["direto"], "Recebido": T["recebido"], "Total": T["total"]})
         
-        # A tabela agora armazena a seleção usando a key "tbl_centros"
         evento = mostrar(
             st.dataframe,
             vis.style.format({"Direto": cc.brl, "Recebido": cc.brl, "Total": cc.brl}),
@@ -190,7 +223,6 @@ def pagina_dashboard():
     dict_anos = cc.ano_mes_dict(todos)
     anos_disp = list(dict_anos.keys())
     
-    # 1. Filtros Separados de Ano e Mês
     f1, f2, f3, f4, f5 = st.columns([1, 2, 2, 2, 3])
     with f1: ano_sel = st.selectbox("Ano", anos_disp)
     with f2: mes_sel = st.multiselect("Meses (vazio = ano todo)", options=dict_anos[ano_sel], format_func=cc.rotulo_mes)
@@ -206,7 +238,7 @@ def pagina_dashboard():
     res_all = cc.resumo_centros(d, i, cad, periodos)
     L = cc.filtrar_centros(res_all, sel_c, sel_s, busca)
     
-    # Lógica de Captura do Selecionado (Para tornar os KPIs inteligentes)
+    # Captura da Seleção de Centro de Custo
     T_ordenado = L.sort_values("total", ascending=False).reset_index(drop=True)
     sel_id = None
     estado_tbl = st.session_state.get("tbl_centros")
@@ -214,9 +246,9 @@ def pagina_dashboard():
         linha = estado_tbl["selection"]["rows"][0]
         if linha < len(T_ordenado): sel_id = T_ordenado["cc_id"].iloc[linha]
 
-    # 2. KPIs Dinâmicos (Mudam se você clicar na tabela)
+    # KPIs Dinâmicos (Aplicando a regra inter-segmento se for filtrado por Segmentos)
     L_kpi = L[L["cc_id"] == sel_id] if sel_id else L
-    k = cc.kpis(L_kpi)
+    k = cc.kpis(L_kpi, indireto=i, periodos=periodos, segmentos_filtrados=sel_s if not sel_id else None)
     
     st.markdown(f"#### {'Resumo: ' + cad[cad['cc_id']==sel_id].iloc[0]['cc_nome'] if sel_id else 'Visão Global'}")
     cols = st.columns(5)
@@ -233,7 +265,7 @@ def pagina_dashboard():
     esq, dir_ = st.columns([1.15, 1], gap="medium")
     with esq:
         bloco_segmentos(L, i, cad, periodos, com_origem)
-        bloco_centros(L)  # Aqui a tabela é desenhada
+        bloco_centros(L)
     with dir_:
         painel_detalhe(sel_id, res_all, d, i, cad, periodos, todos, com_origem)
 
@@ -245,13 +277,17 @@ def pagina_relatorio():
     todos = cc.periodos_disponiveis(d, i)
     anos_disp = list(cc.ano_mes_dict(todos).keys())
     
-    c1, c2, c3 = st.columns([1.5, 4, 1.5])
-    with c1: ano_sel = st.selectbox("Ano de Análise", anos_disp)
+    c1, c2, c3 = st.columns([1.5, 3.5, 2])
+    with c1: 
+        ano_sel = st.selectbox("Ano de Análise", anos_disp)
     with c2: 
         opcoes_busca = cad["cc_id"] + " - " + cad["cc_nome"]
         cc_buscado = st.selectbox("Selecione o Centro de Custo", options=[""] + list(opcoes_busca))
-    
-    if not cc_buscado: return st.info("⬆️ Selecione um centro de custo acima para gerar o relatório matricial.")
+    with c3:
+        mes_limite = st.slider("Considerar até o mês (Soma / Média)", min_value=1, max_value=12, value=12, help="Ajusta o cálculo das colunas TOTAL e MÉDIA acumuladas até o mês selecionado.")
+
+    if not cc_buscado: 
+        return st.info("⬆️ Selecione um centro de custo acima para gerar o relatório matricial.")
         
     cc_id = cc_buscado.split(" - ")[0]
     info = cad[cad["cc_id"] == cc_id].iloc[0]
@@ -260,30 +296,26 @@ def pagina_relatorio():
     st.caption(f"Código: {cc_id} | Classificação: {info['classificacao']} | Segmento: {info['segmento']}")
     st.markdown("---")
     
-    # 3. Matriz Estilo Excel
-    st.subheader("1. Evolução do Custo Direto")
-    pv = cc.relatorio_direto_pivot(d, cc_id, ano_sel)
-    if pv.empty:
+    # 1. Matriz Custo Direto (01 a 12 + Total + Média)
+    st.subheader(f"1. Evolução do Custo Direto (Acumulado até Mês {mes_limite:02d})")
+    pv_dir = cc.relatorio_direto_pivot(d, cc_id, ano_sel, mes_limite=mes_limite)
+    if pv_dir.empty or (pv_dir.drop(columns=["TOTAL", "MÉDIA"], errors="ignore").sum().sum() == 0):
         st.caption("Sem custos diretos registrados neste ano.")
     else:
-        fmt = {c: cc.brl for c in pv.columns}
-        st.dataframe(pv.style.format(fmt), use_container_width=True, height=min(38 * (len(pv) + 1) + 3, 700))
+        fmt = {col: cc.brl for col in pv_dir.columns}
+        st.dataframe(pv_dir.style.format(fmt), use_container_width=True, height=min(38 * (len(pv_dir) + 1) + 3, 600))
         
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # 4. Drill-Down do Indireto
-    st.subheader("2. Origens do Custo Indireto (Rateio Recebido)")
-    ind_data = cc.relatorio_indireto_drilldown(i, cc_id, ano_sel)
+    # 2. Matriz Custo Indireto / Rateio Recebido (01 a 12 + Total + Média por Origem)
+    st.subheader(f"2. Origens do Custo Indireto - Rateio Recebido (Acumulado até Mês {mes_limite:02d})")
+    pv_ind = cc.relatorio_indireto_pivot(i, cc_id, ano_sel, mes_limite=mes_limite)
     
-    if ind_data.empty:
+    if pv_ind.empty:
         st.caption("Este centro não recebeu rateios indiretos neste ano.")
     else:
-        por_seg = ind_data.groupby("origem_segmento")["valor"].sum().sort_values(ascending=False)
-        for seg, tot_seg in por_seg.items():
-            with st.expander(f"🏢 Rateio vindo do Segmento: **{seg}** — Total Absorvido: **{cc.brl(tot_seg)}**"):
-                detalhes = ind_data[ind_data["origem_segmento"] == seg].sort_values("valor", ascending=False)
-                for _, row in detalhes.iterrows():
-                    st.write(f"▪ **{row['origem_nome']}** `(CC: {row['origem_id']})` repassou **{cc.brl(row['valor'])}**")
+        fmt = {col: cc.brl for col in pv_ind.columns}
+        st.dataframe(pv_ind.style.format(fmt), use_container_width=True, height=min(38 * (len(pv_ind) + 1) + 3, 500))
 
 def bloco_upload(tipo, titulo, campos, normalizar):
     st.subheader(titulo)
