@@ -10,7 +10,6 @@ import numpy as np
 MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
 ORDEM_CLASSIF = ["Administrativo", "Apoio", "Produtivo", "Neutro"]
 
-# Ordem exata das contas para o Relatório Gerencial
 ORDEM_CONTAS = [
     "Despesas com Pessoal", "Pessoal Terceirizado", "Outras Despesas de Pessoal com/sem Vínculo", 
     "Material de Uso na Saúde", "Material de Uso e Consumo", "Materiais de Uso Educacional",
@@ -314,9 +313,9 @@ def relatorio_indireto_por_segmento(indireto, cc_id, ano_selecionado, mes_limite
     detalhes_por_seg = {}
     for seg in sorted(ii["origem_segmento"].unique()):
         sub = ii[ii["origem_segmento"] == seg].copy()
-        nome = sub["origem_nome"].fillna(sub["origem_id"])
-        cod = sub["origem_id"].fillna("")
-        sub["origem_rotulo"] = nome + " (" + cod + ")"
+        
+        # AJUSTE FINO: Removemos o código, exibe apenas o NOME da origem para não embolar o PDF
+        sub["origem_rotulo"] = sub["origem_nome"].fillna(sub["origem_id"])
         
         pv_sub = sub.pivot_table(index="origem_rotulo", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
         pv_sub = pv_sub.reindex(columns=cols_meses, fill_value=0.0)
@@ -329,7 +328,21 @@ def relatorio_indireto_por_segmento(indireto, cc_id, ano_selecionado, mes_limite
         
     return pv_seg, detalhes_por_seg
 
-def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, ano_sel, mes_limite):
+def relatorio_total_pivot(pv_dir, pv_seg, mes_limite=12):
+    cols_meses = [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
+    df_tot = pd.DataFrame(0.0, index=["1. Custo Direto", "2. Rateio Recebido", "3. Custo Total"], columns=cols_meses)
+    
+    if not pv_dir.empty and "TOTAL DO CUSTO DIRETO" in pv_dir.index:
+        df_tot.loc["1. Custo Direto", pv_dir.columns] = pv_dir.loc["TOTAL DO CUSTO DIRETO"]
+        
+    if not pv_seg.empty and "TOTAL RATEIO RECEBIDO" in pv_seg.index:
+        df_tot.loc["2. Rateio Recebido", pv_seg.columns] = pv_seg.loc["TOTAL RATEIO RECEBIDO"]
+        
+    df_tot.loc["3. Custo Total"] = df_tot.loc["1. Custo Direto"] + df_tot.loc["2. Rateio Recebido"]
+    df_tot.index.name = "Resumo Consolidado"
+    return df_tot
+
+def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, pv_tot, ano_sel, mes_limite):
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -370,79 +383,55 @@ def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, ano_sel, mes_lim
         n = round(float(v))
         return f"{abs(n):,.0f}".replace(",", ".")
 
+    def criar_tabela_pdf(df_tabela):
+        header = [str(df_tabela.index.name) if df_tabela.index.name else ""] + [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
+        table_data = [header]
+        for idx, row in df_tabela.iterrows():
+            r = [str(idx)] + [fmt_pdf_val(row[col]) for col in [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]]
+            table_data.append(r)
+            
+        t = Table(table_data, colWidths=[135] + [43]*12 + [58, 54])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F1F5F9')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#0F172A')),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 2.5),
+            ('TOPPADDING', (0,0), (-1,-1), 2.5),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
+            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#E2E8F0')),
+            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+        ]))
+        return t
+
     # 1. Custo Direto
     elements.append(Paragraph(f"1. Evolução do Custo Direto (em R$ - Acumulado até Mês {mes_limite:02d})", section_style))
     if not pv_dir.empty:
-        header = ["Grupo de Conta"] + [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
-        table_data = [header]
-        for idx, row in pv_dir.iterrows():
-            r = [str(idx)] + [fmt_pdf_val(row[col]) for col in [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]]
-            table_data.append(r)
-            
-        t_dir = Table(table_data, colWidths=[135] + [43]*12 + [58, 54])
-        t_dir.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F1F5F9')),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#0F172A')),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0,0), (-1,-1), 7),
-            ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 2.5),
-            ('TOPPADDING', (0,0), (-1,-1), 2.5),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#E2E8F0')),
-            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
-        ]))
-        elements.append(t_dir)
+        elements.append(criar_tabela_pdf(pv_dir))
 
-    # 2. Resumo por Segmento
+    # 2. Custo Indireto - Resumo
     elements.append(Spacer(1, 10))
     elements.append(Paragraph(f"2. Resumo das Origens do Custo Indireto por Segmento (em R$)", section_style))
     if not pv_seg.empty:
-        header = ["Segmento Origem"] + [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
-        table_data = [header]
-        for idx, row in pv_seg.iterrows():
-            r = [str(idx)] + [fmt_pdf_val(row[col]) for col in [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]]
-            table_data.append(r)
-            
-        t_seg = Table(table_data, colWidths=[135] + [43]*12 + [58, 54])
-        t_seg.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F1F5F9')),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#0F172A')),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0,0), (-1,-1), 7),
-            ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 2.5),
-            ('TOPPADDING', (0,0), (-1,-1), 2.5),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#E2E8F0')),
-            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
-        ]))
-        elements.append(t_seg)
-
-    # 3. Detalhamento por Centro de Custo
+        elements.append(criar_tabela_pdf(pv_seg))
+        
+    # 3. Custo Total (NOVO)
     elements.append(Spacer(1, 10))
-    elements.append(Paragraph(f"3. Detalhamento por Centro de Custo de Origem", section_style))
+    elements.append(Paragraph(f"3. Custo Total do Centro (Direto + Indireto em R$)", section_style))
+    if not pv_tot.empty:
+        t_tot = criar_tabela_pdf(pv_tot)
+        t_tot.setStyle(TableStyle([('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#DBEAFE'))])) # Destaca a linha do Total
+        elements.append(t_tot)
+
+    # 4. Detalhamento
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph(f"4. Detalhamento por Centro de Custo de Origem", section_style))
     for seg_nome, pv_sub in detalhes_seg.items():
         elements.append(Paragraph(f"<b>Origem: Segmento {seg_nome}</b>", subsec_style))
-        header = ["Centro de Custo de Origem"] + [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
-        table_data = [header]
-        for idx, row in pv_sub.iterrows():
-            r = [str(idx)] + [fmt_pdf_val(row[col]) for col in [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]]
-            table_data.append(r)
-            
-        t_sub = Table(table_data, colWidths=[135] + [43]*12 + [58, 54])
-        t_sub.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F8FAFC')),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#334155')),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0,0), (-1,-1), 6.5),
-            ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 2),
-            ('TOPPADDING', (0,0), (-1,-1), 2),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
-            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#F1F5F9')),
-            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
-        ]))
+        t_sub = criar_tabela_pdf(pv_sub)
+        # Fonte levemente menor para caber melhor o texto na tela
+        t_sub.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F8FAFC')), ('FONTSIZE', (0,0), (-1,-1), 6.5)]))
         elements.append(t_sub)
         elements.append(Spacer(1, 4))
 
