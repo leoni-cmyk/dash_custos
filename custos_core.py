@@ -2,6 +2,7 @@
 Lógica de dados do Dashboard de Custos (sem dependência de Streamlit).
 """
 import re
+import io
 import unicodedata
 import pandas as pd
 import numpy as np
@@ -41,9 +42,6 @@ CAMPOS_INDIRETO = [
     ("origem_segmento", "Segmento da origem", False, ["segmento origem", "noseguimento_origem"]),
 ]
 
-# ----------------------------------------------------------------------
-# Utilitários de Formatação e Normalização
-# ----------------------------------------------------------------------
 def brl(v) -> str:
     if pd.isna(v): return "–"
     n = round(float(v or 0))
@@ -130,9 +128,6 @@ def normalizar_indireto(raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
     })
     return df.dropna(subset=["periodo", "destino_id", "valor"]).reset_index(drop=True)
 
-# ----------------------------------------------------------------------
-# Agregações Analíticas
-# ----------------------------------------------------------------------
 def tem_origem(ind: pd.DataFrame) -> bool: return ind is not None and ind["origem_id"].notna().any()
 
 def montar_cadastro(direto: pd.DataFrame, indireto: pd.DataFrame) -> pd.DataFrame:
@@ -183,8 +178,6 @@ def filtrar_centros(res, classificacoes=None, segmentos=None, busca="") -> pd.Da
 
 def kpis(res: pd.DataFrame, indireto=None, periodos=None, segmentos_filtrados=None) -> dict:
     d = res["direto"].sum()
-    
-    # Exclusão Intra-Segmento para visão agregada de segmento (quando não é um CC único)
     if segmentos_filtrados and indireto is not None and periodos is not None and len(res) > 1:
         ii = indireto[indireto["periodo"].isin(periodos)]
         r = ii[(ii["destino_segmento"].isin(segmentos_filtrados)) & (~ii["origem_segmento"].isin(segmentos_filtrados))]["valor"].sum()
@@ -203,9 +196,7 @@ def resumo_segmentos(res: pd.DataFrame, indireto=None, periodos=None) -> pd.Data
         linhas = []
         for s in segs:
             d_val = res[res["segmento"] == s]["direto"].sum()
-            # Inter-segmento: recebido vindo de OUTROS segmentos
             rec_inter = ii[(ii["destino_segmento"] == s) & (ii["origem_segmento"] != s)]["valor"].sum()
-            # Inter-segmento: rateado enviado para OUTROS segmentos
             rat_inter = ii[(ii["origem_segmento"] == s) & (ii["destino_segmento"] != s)]["valor"].sum()
             linhas.append({
                 "segmento": s,
@@ -220,6 +211,27 @@ def resumo_segmentos(res: pd.DataFrame, indireto=None, periodos=None) -> pd.Data
         g["total"] = g["direto"] + g["recebido"]
         g = g.reset_index()
     return g.sort_values("total", ascending=False).reset_index(drop=True)
+
+def detalhe_origens_inter_segmento(indireto, periodos, segmentos_filtrados) -> pd.DataFrame:
+    ii = indireto[indireto["periodo"].isin(periodos)].copy()
+    ii["destino_segmento"] = ii["destino_segmento"].fillna("Sem Segmento")
+    ii["origem_segmento"] = ii["origem_segmento"].fillna("Sem Segmento")
+    
+    inter = ii[(ii["destino_segmento"].isin(segmentos_filtrados)) & (~ii["origem_segmento"].isin(segmentos_filtrados))]
+    if inter.empty:
+        return pd.DataFrame()
+        
+    g = inter.groupby(["destino_segmento", "origem_segmento"])["valor"].sum().reset_index()
+    totais = g.groupby("destino_segmento")["valor"].transform("sum")
+    g["pct"] = (g["valor"] / totais) * 100
+    
+    g = g.rename(columns={
+        "destino_segmento": "Segmento Destino",
+        "origem_segmento": "Segmento de Origem",
+        "valor": "Valor Recebido",
+        "pct": "% do Recebido Inter"
+    }).sort_values(["Segmento Destino", "Valor Recebido"], ascending=[True, False])
+    return g
 
 def matriz_segmentos(indireto, cad, ids_origem, periodos) -> pd.DataFrame:
     ii = indireto[indireto["periodo"].isin(periodos) & indireto["origem_id"].isin(ids_origem)]
@@ -254,12 +266,8 @@ def total_rateado_pela_origem(indireto, periodos) -> pd.Series:
     ii = indireto[indireto["periodo"].isin(periodos)]
     return ii.groupby("origem_id")["valor"].sum()
 
-# ----------------------------------------------------------------------
-# Relatório Consolidado (Pivot Matricial com Meses 01-12, Total e Média)
-# ----------------------------------------------------------------------
 def relatorio_direto_pivot(direto, cc_id, ano_selecionado, mes_limite=12):
     d = direto[(direto["cc_id"] == cc_id) & (direto["periodo"].astype(str).str.startswith(str(ano_selecionado))) & (direto["grupo"].notna())].copy()
-    
     cols_meses = [f"{m:02d}" for m in range(1, 13)]
     
     if d.empty:
@@ -284,29 +292,159 @@ def relatorio_direto_pivot(direto, cc_id, ano_selecionado, mes_limite=12):
     pv.loc["TOTAL DO CUSTO DIRETO"] = pv.sum(numeric_only=True)
     return pv
 
-def relatorio_indireto_pivot(indireto, cc_id, ano_selecionado, mes_limite=12):
+def relatorio_indireto_por_segmento(indireto, cc_id, ano_selecionado, mes_limite=12):
     ii = indireto[(indireto["destino_id"] == cc_id) & (indireto["periodo"].astype(str).str.startswith(str(ano_selecionado)))].copy()
-    
     cols_meses = [f"{m:02d}" for m in range(1, 13)]
     
     if ii.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     ii["mes"] = ii["periodo"].astype(str).str[-2:]
-    
-    seg = ii["origem_segmento"].fillna("Sem Segmento")
-    nome = ii["origem_nome"].fillna(ii["origem_id"])
-    cod = ii["origem_id"].fillna("")
-    ii["origem_rotulo"] = seg + " - " + nome + " (" + cod + ")"
-    
-    pv = ii.pivot_table(index="origem_rotulo", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
-    pv = pv.reindex(columns=cols_meses, fill_value=0.0)
-    
+    ii["origem_segmento"] = ii["origem_segmento"].fillna("Sem Segmento")
     cols_limite = [f"{m:02d}" for m in range(1, mes_limite + 1)]
-    pv["TOTAL"] = pv[cols_limite].sum(axis=1)
-    pv["MÉDIA"] = pv["TOTAL"] / max(1, mes_limite)
     
-    pv = pv.sort_values("TOTAL", ascending=False)
-    pv.loc["TOTAL DO CUSTO INDIRETO"] = pv.sum(numeric_only=True)
-    pv.index.name = "Origem do Rateio"
-    return pv
+    pv_seg = ii.pivot_table(index="origem_segmento", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
+    pv_seg = pv_seg.reindex(columns=cols_meses, fill_value=0.0)
+    pv_seg["TOTAL"] = pv_seg[cols_limite].sum(axis=1)
+    pv_seg["MÉDIA"] = pv_seg["TOTAL"] / max(1, mes_limite)
+    pv_seg = pv_seg.sort_values("TOTAL", ascending=False)
+    pv_seg.loc["TOTAL RATEIO RECEBIDO"] = pv_seg.sum(numeric_only=True)
+    pv_seg.index.name = "Segmento de Origem"
+    
+    detalhes_por_seg = {}
+    for seg in sorted(ii["origem_segmento"].unique()):
+        sub = ii[ii["origem_segmento"] == seg].copy()
+        nome = sub["origem_nome"].fillna(sub["origem_id"])
+        cod = sub["origem_id"].fillna("")
+        sub["origem_rotulo"] = nome + " (" + cod + ")"
+        
+        pv_sub = sub.pivot_table(index="origem_rotulo", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
+        pv_sub = pv_sub.reindex(columns=cols_meses, fill_value=0.0)
+        pv_sub["TOTAL"] = pv_sub[cols_limite].sum(axis=1)
+        pv_sub["MÉDIA"] = pv_sub["TOTAL"] / max(1, mes_limite)
+        pv_sub = pv_sub.sort_values("TOTAL", ascending=False)
+        pv_sub.loc[f"TOTAL {seg.upper()}"] = pv_sub.sum(numeric_only=True)
+        pv_sub.index.name = "Centro de Custo de Origem"
+        detalhes_por_seg[seg] = pv_sub
+        
+    return pv_seg, detalhes_por_seg
+
+def gerar_pdf_relatorio(cad_info, pv_dir, pv_seg, detalhes_seg, ano_sel, mes_limite):
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+    except ImportError:
+        return None
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=20,
+        leftMargin=20,
+        topMargin=20,
+        bottomMargin=20
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=15, leading=18, textColor=colors.HexColor('#0F172A'))
+    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=8.5, leading=12, textColor=colors.HexColor('#475569'))
+    section_style = ParagraphStyle('SectionStyle', parent=styles['Heading2'], fontSize=10.5, leading=14, textColor=colors.HexColor('#1E40AF'), spaceBefore=8, spaceAfter=4)
+    subsec_style = ParagraphStyle('SubSectionStyle', parent=styles['Heading3'], fontSize=9, leading=12, textColor=colors.HexColor('#0F172A'), spaceBefore=6, spaceAfter=2)
+
+    elements = []
+    elements.append(Paragraph(f"<b>RELATÓRIO GERENCIAL CONSOLIDADO DE CUSTOS — {ano_sel}</b>", title_style))
+    elements.append(Paragraph(
+        f"<b>Centro de Custo:</b> {cad_info['cc_nome']} ({cad_info['cc_id']}) | "
+        f"<b>Classificação:</b> {cad_info['classificacao']} | "
+        f"<b>Segmento:</b> {cad_info['segmento']} | "
+        f"<b>Acumulado até Mês:</b> {mes_limite:02d}",
+        sub_style
+    ))
+    elements.append(Spacer(1, 8))
+
+    def fmt_pdf_val(v):
+        if pd.isna(v) or v == 0: return "-"
+        n = round(float(v))
+        return f"{abs(n):,.0f}".replace(",", ".")
+
+    # 1. Custo Direto
+    elements.append(Paragraph(f"1. Evolução do Custo Direto (em R$ - Acumulado até Mês {mes_limite:02d})", section_style))
+    if not pv_dir.empty:
+        header = ["Grupo de Conta"] + [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
+        table_data = [header]
+        for idx, row in pv_dir.iterrows():
+            r = [str(idx)] + [fmt_pdf_val(row[col]) for col in [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]]
+            table_data.append(r)
+            
+        t_dir = Table(table_data, colWidths=[135] + [43]*12 + [58, 54])
+        t_dir.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F1F5F9')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#0F172A')),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 2.5),
+            ('TOPPADDING', (0,0), (-1,-1), 2.5),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
+            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#E2E8F0')),
+            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+        ]))
+        elements.append(t_dir)
+
+    # 2. Resumo por Segmento
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph(f"2. Resumo das Origens do Custo Indireto por Segmento (em R$)", section_style))
+    if not pv_seg.empty:
+        header = ["Segmento Origem"] + [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
+        table_data = [header]
+        for idx, row in pv_seg.iterrows():
+            r = [str(idx)] + [fmt_pdf_val(row[col]) for col in [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]]
+            table_data.append(r)
+            
+        t_seg = Table(table_data, colWidths=[135] + [43]*12 + [58, 54])
+        t_seg.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F1F5F9')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#0F172A')),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 2.5),
+            ('TOPPADDING', (0,0), (-1,-1), 2.5),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
+            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#E2E8F0')),
+            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+        ]))
+        elements.append(t_seg)
+
+    # 3. Detalhamento por Centro de Custo
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph(f"3. Detalhamento por Centro de Custo de Origem", section_style))
+    for seg_nome, pv_sub in detalhes_seg.items():
+        elements.append(Paragraph(f"<b>Origem: Segmento {seg_nome}</b>", subsec_style))
+        header = ["Centro de Custo de Origem"] + [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]
+        table_data = [header]
+        for idx, row in pv_sub.iterrows():
+            r = [str(idx)] + [fmt_pdf_val(row[col]) for col in [f"{m:02d}" for m in range(1, 13)] + ["TOTAL", "MÉDIA"]]
+            table_data.append(r)
+            
+        t_sub = Table(table_data, colWidths=[135] + [43]*12 + [58, 54])
+        t_sub.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F8FAFC')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor('#334155')),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 6.5),
+            ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ('TOPPADDING', (0,0), (-1,-1), 2),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#F1F5F9')),
+            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+        ]))
+        elements.append(t_sub)
+        elements.append(Spacer(1, 4))
+
+    doc.build(elements)
+    return buffer.getvalue()
