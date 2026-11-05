@@ -1,365 +1,228 @@
 """
-Dashboard de Custos 2026 — versão Streamlit
+Lógica de dados do Dashboard de Custos (sem dependência de Streamlit).
 """
-import inspect
-import io
-from pathlib import Path
-
+import re
+import unicodedata
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-import custos_core as cc
 
-COR_DIRETO, COR_RATEIO, COR_RATEADO, COR_GRUPO = "#2f6fed", "#f08c2e", "#16a37f", "#8b5cf6"
-DATA_DIR = Path(__file__).parent / "dados"
+MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+ORDEM_CLASSIF = ["Administrativo", "Apoio", "Produtivo", "Neutro"]
 
-st.set_page_config(page_title="Custos 2026", page_icon="📊", layout="wide")
-st.markdown(
-    """<style>
-    .block-container{padding-top:1.8rem;max-width:1600px}
-    [data-testid="stMetricValue"]{font-size:1.35rem}
-    [data-testid="stMetricLabel"] p{font-size:.8rem;opacity:.7}
-    h3{font-size:1rem!important;margin-bottom:.2rem}
-    </style>""",
-    unsafe_allow_html=True,
-)
+# ----------------------------------------------------------------------
+# Campos esperados em cada planilha (com os nomes reais do ERP Feso mapeados)
+# ----------------------------------------------------------------------
+CAMPOS_DIRETO = [
+    ("periodo", "Período", True, ["periodo", "competencia", "mes", "ano mes", "anomes", "cdperiodocompetencia"]),
+    ("cc_nome", "Centro de custo (nome)", True, ["centro de custo", "nome centro de custo", "cc", "descricao", "nocentrocusto"]),
+    ("classificacao", "Classificação", True, ["classificacao", "classificacao cc", "tipo", "classificacaocc"]),
+    ("segmento", "Segmento", True, ["segmento", "unidade", "seguimento"]),
+    ("valor", "Valor", True, ["valor", "valor rs", "vlr", "total", "vllancamentocentrocusto total"]),
+    ("cc_codigo", "Centro de custo (código)", False, ["codigo", "cod", "codigo centro de custo", "codigo cc", "cdcentrocusto"]),
+    ("grupo", "Grupo de conta", False, ["grupo de conta", "grupo", "conta", "nogrupoconta"]),
+]
 
-# ======================================================================
-# Utilitários
-# ======================================================================
-def mostrar(func, *args, **kw):
-    if "width" not in inspect.signature(func).parameters:
-        return func(*args, use_container_width=True, **kw)
+CAMPOS_INDIRETO = [
+    ("periodo", "Período", True, ["periodo", "competencia", "mes", "anomes", "periodo_competencia"]),
+    ("destino_nome", "Centro de custo DESTINO (nome)", True, ["destino", "nome_centrocusto_destino"]),
+    ("valor", "Valor", True, ["valor", "valor rs", "vlr", "total", "valor_rateio total"]),
+    ("origem_nome", "Centro de custo ORIGEM (nome)", False, ["origem", "nome_centrocusto_origem"]),
+    ("destino_codigo", "Destino (código)", False, ["cod destino", "codigo", "cod_centrocusto_destino"]),
+    ("origem_codigo", "Origem (código)", False, ["cod origem", "cod_centrocusto_origem"]),
+    ("destino_classificacao", "Classificação do destino", False, ["classificacao destino", "classificacao_destino"]),
+    ("destino_segmento", "Segmento do destino", False, ["segmento destino", "noseguimento_destino"]),
+    ("origem_classificacao", "Classificação da origem", False, ["classificacao origem", "classificacao_origem"]),
+    ("origem_segmento", "Segmento da origem", False, ["segmento origem", "noseguimento_origem"]),
+]
+
+# ----------------------------------------------------------------------
+# Formatação e Detecção de colunas
+# ----------------------------------------------------------------------
+def brl(v) -> str:
+    n = round(float(v or 0))
+    s = f"{abs(n):,.0f}".replace(",", ".")
+    return ("-" if n < 0 else "") + "R$ " + s
+
+def pct(a, b) -> str:
+    return f"{a / b * 100:.1f}".replace(".", ",") + "%" if b else "–"
+
+def rotulo_periodo(p: str) -> str:
     try:
-        return func(*args, width="stretch", **kw)
-    except (TypeError, st.errors.StreamlitAPIException):
-        return func(*args, use_container_width=True, **kw)
+        return f"{MESES[int(p[4:6]) - 1]}/{p[2:4]}"
+    except (ValueError, IndexError):
+        return str(p)
 
-def tabela(df, fmt=None, altura=None, **kw):
-    obj = df.style.format(fmt) if fmt else df
-    if altura is None:
-        altura = min(36 * (len(df) + 1) + 3, 360)
-    return mostrar(st.dataframe, obj, hide_index=True, height=altura, **kw)
+def _norm_txt(s) -> str:
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
-def dash(v):
-    return cc.brl(v) if v else "–"
+def auto_mapear(colunas, campos) -> dict:
+    por_norm = {_norm_txt(c): c for c in colunas}
+    usadas, mapa = set(), {}
+    for chave, _rot, _obr, apelidos in campos:
+        mapa[chave] = None
+        for a in apelidos:
+            col = por_norm.get(_norm_txt(a))
+            if col is not None and col not in usadas:
+                mapa[chave] = col
+                usadas.add(col)
+                break
+    return mapa
 
-@st.cache_data(show_spinner="Lendo planilha…")
-def ler_excel(conteudo: bytes) -> pd.DataFrame:
-    return pd.read_excel(io.BytesIO(conteudo))
+def _periodo(v) -> str | None:
+    if pd.isna(v): return None
+    if hasattr(v, "strftime"): return v.strftime("%Y%m")
+    s = str(v).strip()
+    if re.fullmatch(r"\d{6}", s): return s
+    if re.fullmatch(r"\d{6}\.0", s): return s[:6]
+    m = re.fullmatch(r"(\d{4})[-/](\d{1,2})(?:[-/]\d{1,2})?(?:\s.*)?", s)
+    if m: return f"{m.group(1)}{int(m.group(2)):02d}"
+    m = re.fullmatch(r"(\d{1,2})[-/](\d{4})", s)
+    if m: return f"{m.group(2)}{int(m.group(1)):02d}"
+    return s
 
-# ======================================================================
-# Estado e persistência
-# ======================================================================
-def _arq(tipo):
-    return DATA_DIR / f"{tipo}.pkl"
+def _valor(serie: pd.Series) -> pd.Series:
+    if serie.dtype == object:
+        serie = (serie.astype(str).str.replace("R$", "", regex=False).str.strip()
+                 .str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
+    return pd.to_numeric(serie, errors="coerce")
 
-def salvar_base(tipo, df):
-    DATA_DIR.mkdir(exist_ok=True)
-    df.to_pickle(_arq(tipo))
+def _txt(serie: pd.Series) -> pd.Series:
+    s = serie.astype("string").str.strip()
+    return s.mask(s.isin(["", "nan", "None", "<NA>"]))
 
-def remover_base(tipo):
-    _arq(tipo).unlink(missing_ok=True)
-    st.session_state[f"df_{tipo}"] = None
-    atualizar_cadastro()
+def _col(raw, mapa, chave):
+    c = mapa.get(chave)
+    return _txt(raw[c]) if c else pd.Series(pd.NA, index=raw.index, dtype="string")
 
-def atualizar_cadastro():
-    d, i = st.session_state["df_direto"], st.session_state["df_indireto"]
-    if d is None or i is None:
-        st.session_state["cadastro"], st.session_state["avisos"] = None, []
-        return
-    cad = cc.montar_cadastro(d, i)
-    st.session_state["cadastro"] = cad
-    st.session_state["avisos"] = cc.diagnostico(d, i, cad)
+def normalizar_direto(raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
+    nome = _col(raw, mapa, "cc_nome")
+    cod = _col(raw, mapa, "cc_codigo")
+    df = pd.DataFrame({
+        "periodo": raw[mapa["periodo"]].map(_periodo),
+        "cc_id": cod.fillna(nome),
+        "cc_nome": nome,
+        "classificacao": _col(raw, mapa, "classificacao"),
+        "segmento": _col(raw, mapa, "segmento"),
+        "grupo": _col(raw, mapa, "grupo"),
+        "valor": _valor(raw[mapa["valor"]]),
+    })
+    return df.dropna(subset=["periodo", "cc_id", "valor"]).reset_index(drop=True)
 
-def iniciar_estado():
-    for tipo in ("direto", "indireto"):
-        if f"df_{tipo}" not in st.session_state:
-            st.session_state[f"df_{tipo}"] = pd.read_pickle(_arq(tipo)) if _arq(tipo).exists() else None
-    if "cadastro" not in st.session_state:
-        atualizar_cadastro()
+def normalizar_indireto(raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
+    d_nome, d_cod = _col(raw, mapa, "destino_nome"), _col(raw, mapa, "destino_codigo")
+    o_nome, o_cod = _col(raw, mapa, "origem_nome"), _col(raw, mapa, "origem_codigo")
+    df = pd.DataFrame({
+        "periodo": raw[mapa["periodo"]].map(_periodo),
+        "destino_id": d_cod.fillna(d_nome),
+        "destino_nome": d_nome,
+        "destino_classificacao": _col(raw, mapa, "destino_classificacao"),
+        "destino_segmento": _col(raw, mapa, "destino_segmento"),
+        "origem_id": o_cod.fillna(o_nome),
+        "origem_nome": o_nome,
+        "origem_classificacao": _col(raw, mapa, "origem_classificacao"),
+        "origem_segmento": _col(raw, mapa, "origem_segmento"),
+        "valor": _valor(raw[mapa["valor"]]),
+    })
+    return df.dropna(subset=["periodo", "destino_id", "valor"]).reset_index(drop=True)
 
-iniciar_estado()
+def tem_origem(ind: pd.DataFrame) -> bool:
+    return ind is not None and ind["origem_id"].notna().any()
 
-# ======================================================================
-# Gráficos
-# ======================================================================
-def _estilo(fig, altura):
-    fig.update_layout(
-        height=altura, margin=dict(l=0, r=0, t=10, b=0), separators=",.",
-        legend=dict(orientation="h", y=1.15, x=1, xanchor="right", title_text=""),
-        xaxis_title=None, yaxis_title=None,
-    )
-    return fig
+# ----------------------------------------------------------------------
+# Cadastro e Agregações
+# ----------------------------------------------------------------------
+def montar_cadastro(direto: pd.DataFrame, indireto: pd.DataFrame) -> pd.DataFrame:
+    cols = ["cc_id", "cc_nome", "classificacao", "segmento"]
+    partes = [direto[cols]]
+    for lado in ("destino", "origem"):
+        p = indireto[[f"{lado}_id", f"{lado}_nome", f"{lado}_classificacao", f"{lado}_segmento"]]
+        p.columns = cols
+        partes.append(p.dropna(subset=["cc_id"]))
+    cad = pd.concat(partes, ignore_index=True).groupby("cc_id", as_index=False).first()
+    cad["cc_nome"] = cad["cc_nome"].fillna(cad["cc_id"])
+    cad["classificacao"] = cad["classificacao"].fillna("Sem classificação")
+    cad["segmento"] = cad["segmento"].fillna("Sem segmento")
+    return cad.astype(str)
 
-def grafico_evolucao(serie, com_rateado):
-    x = [cc.rotulo_periodo(p) for p in serie["periodo"]]
-    fig = go.Figure()
-    fig.add_bar(x=x, y=serie["direto"], name="Direto", marker_color=COR_DIRETO, hovertemplate="%{y:,.0f}")
-    fig.add_bar(x=x, y=serie["recebido"], name="Rateio recebido", marker_color=COR_RATEIO, hovertemplate="%{y:,.0f}")
-    fig.update_layout(barmode="stack")
-    if com_rateado:
-        fig.add_scatter(x=x, y=serie["rateado"], name="Rateado p/ outros", mode="lines+markers",
-                        line=dict(color=COR_RATEADO, shape="spline"), hovertemplate="%{y:,.0f}")
-    fig.update_yaxes(tickformat=".3~s")
-    return _estilo(fig, 260)
+def diagnostico(direto, indireto, cad) -> list[str]:
+    avisos = []
+    ids_cad = set(direto["cc_id"])
+    for lado in ("destino", "origem"):
+        ids = set(indireto[f"{lado}_id"].dropna())
+        fora = ids - ids_cad
+        if ids and len(fora) / len(ids) > 0.5:
+            avisos.append(f"{len(fora)} de {len(ids)} centros de {lado} do rateio não aparecem na base direta.")
+    if not tem_origem(indireto):
+        avisos.append("A base indireta não tem centro de ORIGEM.")
+    return avisos
 
-def grafico_grupos(g):
-    fig = go.Figure(go.Bar(x=g["valor"], y=g["grupo"], orientation="h", marker_color=COR_GRUPO, hovertemplate="%{x:,.0f}"))
-    fig.update_yaxes(autorange="reversed")
-    fig.update_xaxes(tickformat=".3~s")
-    return _estilo(fig, max(140, len(g) * 28 + 50))
+def periodos_disponiveis(direto, indireto) -> list[str]:
+    return sorted(set(direto["periodo"]) | set(indireto["periodo"]))
 
-# ======================================================================
-# Blocos do detalhe
-# ======================================================================
-def bloco_fluxo(df, titulo_setor, absorvido=None):
-    total = df["valor"].sum()
-    por_seg = df.groupby("segmento")["valor"].sum().sort_values(ascending=False).reset_index()
-    st.caption(" · ".join(f"{k}: {cc.brl(v)}" for k, v in
-                          df.groupby("classificacao")["valor"].sum().sort_values(ascending=False).items()))
-    st.markdown("**Por segmento**")
-    tabela(pd.DataFrame({"Segmento": por_seg["segmento"], "Valor": por_seg["valor"],
-                         "%": [cc.pct(v, total) for v in por_seg["valor"]]}), {"Valor": cc.brl})
-    st.markdown(f"**{titulo_setor}**")
-    t = pd.DataFrame({titulo_setor: df["cc_nome"], "Classificação": df["classificacao"], "Segmento": df["segmento"],
-                      "Valor": df["valor"], "% do total": [cc.pct(v, total) for v in df["valor"]]})
-    fmt = {"Valor": cc.brl}
-    if absorvido is not None:
-        tot_origem = df["cc_id"].map(absorvido)
-        t["Total rateado pela origem"] = tot_origem
-        t["% absorvido da origem"] = [cc.pct(v, o) for v, o in zip(df["valor"], tot_origem)]
-        fmt["Total rateado pela origem"] = cc.brl
-    tabela(t, fmt, altura=min(36 * (len(t) + 1) + 3, 320))
+def resumo_centros(direto, indireto, cad, periodos) -> pd.DataFrame:
+    dd = direto[direto["periodo"].isin(periodos)]
+    ii = indireto[indireto["periodo"].isin(periodos)]
+    out = cad.set_index("cc_id")[["cc_nome", "classificacao", "segmento"]].copy()
+    out["direto"] = dd.groupby("cc_id")["valor"].sum()
+    out["recebido"] = ii.groupby("destino_id")["valor"].sum()
+    out["rateado"] = ii.groupby("origem_id")["valor"].sum()
+    out[["direto", "recebido", "rateado"]] = out[["direto", "recebido", "rateado"]].fillna(0.0)
+    out.loc[out["classificacao"] == "Produtivo", "rateado"] = 0.0
+    out["total"] = out["direto"] + out["recebido"]
+    return out.reset_index()
 
-def painel_detalhe(cc_id, res_all, d, i, cad, periodos, todos, com_origem):
-    if cc_id is None:
-        with st.container(border=True):
-            st.markdown("### Detalhe do centro de custo")
-            st.caption("Selecione um centro na tabela para ver a evolução mensal, composição de custos e rateios.")
-        return
+def filtrar_centros(res, classificacoes=None, segmentos=None, busca="") -> pd.DataFrame:
+    m = pd.Series(True, index=res.index)
+    if classificacoes: 
+        m &= res["classificacao"].isin(classificacoes)
+    if segmentos: 
+        m &= res["segmento"].isin(segmentos)
+    if busca:
+        q = busca.lower().strip()
+        m &= res["cc_nome"].str.lower().str.contains(q, regex=False) | res["cc_id"].str.contains(q, regex=False)
+    res = res[m]
+    return res[(res[["direto", "recebido", "rateado"]] != 0).any(axis=1)]
 
-    c = cad[cad["cc_id"] == cc_id].iloc[0]
-    r = res_all[res_all["cc_id"] == cc_id].iloc[0]
-    rateia = c["classificacao"] != "Produtivo" and com_origem
+def kpis(res: pd.DataFrame) -> dict:
+    d, r, o = res["direto"].sum(), res["recebido"].sum(), res["rateado"].sum()
+    return {"direto": d, "recebido": r, "total": d + r, "pct_indireto": (r / (d + r) * 100) if (d + r) else 0.0, "rateado": o}
 
-    with st.container(border=True):
-        st.markdown(f"### {c['cc_nome']}")
-        st.caption(f"{c['classificacao']} · {c['segmento']} · {cc_id}")
-        cols = st.columns(4 if rateia else 3)
-        cols[0].metric("Direto", cc.brl(r["direto"]))
-        cols[1].metric("Rateio recebido", cc.brl(r["recebido"]))
-        cols[2].metric("Custo total", cc.brl(r["total"]))
-        if rateia:
-            cols[3].metric("Rateado p/ outros", cc.brl(r["rateado"]))
+def resumo_segmentos(res: pd.DataFrame) -> pd.DataFrame:
+    g = res.groupby("segmento")[["direto", "recebido", "rateado"]].sum()
+    g["total"] = g["direto"] + g["recebido"]
+    return g.sort_values("total", ascending=False).reset_index()
 
-    with st.container(border=True):
-        st.markdown("### Evolução mensal")
-        mostrar(st.plotly_chart, grafico_evolucao(cc.serie_mensal(d, i, cc_id, todos), rateia))
+def matriz_segmentos(indireto, cad, ids_origem, periodos) -> pd.DataFrame:
+    ii = indireto[indireto["periodo"].isin(periodos) & indireto["origem_id"].isin(ids_origem)]
+    seg = cad.set_index("cc_id")["segmento"]
+    ii = ii.assign(o=ii["origem_id"].map(seg), d=ii["destino_id"].map(seg))
+    if ii.empty: return pd.DataFrame()
+    pv = ii.pivot_table(index="o", columns="d", values="valor", aggfunc="sum", fill_value=0.0)
+    pv = pv.loc[(pv != 0).any(axis=1), (pv != 0).any(axis=0)]
+    return pv.sort_index().sort_index(axis=1)
 
-    g = cc.direto_por_grupo(d, cc_id, periodos)
-    if not g.empty:
-        with st.container(border=True):
-            st.markdown("### Custo direto por grupo de conta")
-            mostrar(st.plotly_chart, grafico_grupos(g))
+def serie_mensal(direto, indireto, cc_id, todos_periodos) -> pd.DataFrame:
+    s = pd.DataFrame(index=pd.Index(todos_periodos, name="periodo"))
+    s["direto"] = direto[direto["cc_id"] == cc_id].groupby("periodo")["valor"].sum()
+    s["recebido"] = indireto[indireto["destino_id"] == cc_id].groupby("periodo")["valor"].sum()
+    s["rateado"] = indireto[indireto["origem_id"] == cc_id].groupby("periodo")["valor"].sum()
+    return s.fillna(0.0).reset_index()
 
-    if rateia:
-        with st.container(border=True):
-            st.markdown("### Para quem o custo foi rateado")
-            dest = cc.fluxo_do_centro(i, cad, cc_id, periodos, "destino")
-            if dest.empty:
-                st.caption("Sem movimentação no período.")
-            else:
-                bloco_fluxo(dest, "Setor de destino")
+def direto_por_grupo(direto, cc_id, periodos) -> pd.DataFrame:
+    d = direto[(direto["cc_id"] == cc_id) & direto["periodo"].isin(periodos) & direto["grupo"].notna()]
+    g = d.groupby("grupo")["valor"].sum()
+    return g[g != 0].sort_values(ascending=False).reset_index()
 
-    if com_origem:
-        org = cc.fluxo_do_centro(i, cad, cc_id, periodos, "origem")
-        if not org.empty:
-            with st.container(border=True):
-                st.markdown("### Rateio recebido de")
-                bloco_fluxo(org, "Setor de origem", absorvido=cc.total_rateado_pela_origem(i, periodos))
-
-# ======================================================================
-# Blocos da visão geral
-# ======================================================================
-def bloco_segmentos(L, i, cad, periodos, com_origem):
-    seg = cc.resumo_segmentos(L)
-    with st.container(border=True):
-        st.markdown("### Visão por segmento")
-        t = pd.DataFrame({
-            "Segmento": seg["segmento"], "Direto": seg["direto"], "Rateio recebido": seg["recebido"],
-            "Total": seg["total"], "% indireto": [cc.pct(r, t) for r, t in zip(seg["recebido"], seg["total"])],
-            "Rateado p/ outros": seg["rateado"],
-        })
-        tabela(t, {"Direto": cc.brl, "Rateio recebido": cc.brl, "Total": cc.brl, "Rateado p/ outros": dash})
-
-        if not com_origem: return
-        mx = cc.matriz_segmentos(i, cad, set(L["cc_id"]), periodos)
-        if mx.empty: return
-        st.markdown("### Rateio entre segmentos")
-        st.caption("Origem (linha) → destino (coluna), % da origem")
-        tot = mx.sum(axis=1)
-        disp = pd.DataFrame(index=mx.index, columns=mx.columns, dtype=object)
-        for a in mx.index:
-            for b in mx.columns:
-                v = mx.loc[a, b]
-                disp.loc[a, b] = f"{cc.brl(v)} ({cc.pct(v, tot[a])})" if v else "–"
-        disp["Total rateado"] = tot.map(cc.brl)
-        disp.index.name = "Origem \\ Destino"
-
-        def sombra(_):
-            est = pd.DataFrame("", index=disp.index, columns=disp.columns)
-            for a in mx.index:
-                for b in mx.columns:
-                    p = mx.loc[a, b] / tot[a] if tot[a] else 0
-                    est.loc[a, b] = f"background-color: rgba(47,111,237,{p * 0.45:.2f})"
-            return est
-
-        mostrar(st.dataframe, disp.style.apply(sombra, axis=None), height=min(36 * (len(disp) + 1) + 3, 360))
-
-def bloco_centros(L):
-    T = L.sort_values("total", ascending=False).reset_index(drop=True)
-    with st.container(border=True):
-        st.markdown("### Centros de custo — clique na linha para detalhar")
-        vis = pd.DataFrame({
-            "Centro de custo": T["cc_nome"], "Classificação": T["classificacao"], "Segmento": T["segmento"],
-            "Direto": T["direto"], "Rateio recebido": T["recebido"], "Total": T["total"],
-            "Rateado p/ outros": T["rateado"],
-        })
-        evento = mostrar(
-            st.dataframe,
-            vis.style.format({"Direto": cc.brl, "Rateio recebido": cc.brl, "Total": cc.brl, "Rateado p/ outros": dash}),
-            hide_index=True, height=560, on_select="rerun", selection_mode="single-row", key="tbl_centros",
-        )
-    linhas = evento.selection.rows if evento is not None else []
-    return T["cc_id"].iloc[linhas[0]] if linhas and linhas[0] < len(T) else None
-
-# ======================================================================
-# PÁGINAS
-# ======================================================================
-def pagina_dashboard():
-    st.title("Custos 2026")
-    d, i, cad = st.session_state["df_direto"], st.session_state["df_indireto"], st.session_state["cadastro"]
-    if d is None or i is None:
-        st.warning("⚠️ Vá ao menu 'Gerenciar Dados' e carregue as bases (direta e indireta) para ver o dashboard.")
-        return
-    if st.session_state["avisos"]:
-        with st.expander("⚠️ Avisos sobre as bases carregadas"):
-            for a in st.session_state["avisos"]: st.write("• " + a)
-
-    com_origem = cc.tem_origem(i)
-    todos = cc.periodos_disponiveis(d, i)
-    existentes = set(cad["classificacao"])
-    opcoes_classif = [c for c in cc.ORDEM_CLASSIF if c in existentes] + sorted(existentes - set(cc.ORDEM_CLASSIF))
-    opcoes_seg = sorted(cad["segmento"].unique())
-
-    # NOVOS FILTROS: Listas suspensas (Dropdowns) lado a lado
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        sel_p = st.multiselect("Períodos", options=todos, default=todos, format_func=cc.rotulo_periodo)
-        periodos = sel_p if sel_p else todos
-    with f2:
-        sel_c = st.multiselect("Classificações", options=opcoes_classif, default=opcoes_classif)
-        classificacoes = sel_c if sel_c else opcoes_classif
-    with f3:
-        sel_s = st.multiselect("Segmentos", options=opcoes_seg, default=opcoes_seg)
-        segmentos = sel_s if sel_s else opcoes_seg
-    with f4:
-        busca = st.text_input("Buscar", placeholder="Nome ou código do centro...", label_visibility="visible")
-
-    res_all = cc.resumo_centros(d, i, cad, periodos)
-    L = cc.filtrar_centros(res_all, classificacoes, segmentos, busca)
-    k = cc.kpis(L)
-
-    # Lógica para mostrar corretamente "Ano todo" ou "Mes A a Mes B"
-    if len(periodos) == len(todos):
-        faixa = "Ano todo"
-    elif len(periodos) == 1:
-        faixa = cc.rotulo_periodo(periodos[0])
+def fluxo_do_centro(indireto, cad, cc_id, periodos, sentido: str) -> pd.DataFrame:
+    ii = indireto[indireto["periodo"].isin(periodos)]
+    if sentido == "destino":
+        ii, outro = ii[ii["origem_id"] == cc_id], "destino_id"
     else:
-        ps = sorted(periodos)
-        faixa = f"{cc.rotulo_periodo(ps[0])} a {cc.rotulo_periodo(ps[-1])}"
-        
-    st.caption(f"{faixa} · {len(L)} centros filtrados")
+        ii, outro = ii[ii["destino_id"] == cc_id], "origem_id"
+    g = ii.groupby(outro)["valor"].sum()
+    g = g[g != 0].sort_values(ascending=False).rename("valor").reset_index().rename(columns={outro: "cc_id"})
+    return g.merge(cad, on="cc_id", how="left")
 
-    cols = st.columns(5)
-    for col, (rot, val) in zip(cols, [
-        ("Custo direto", cc.brl(k["direto"])), ("Rateio recebido", cc.brl(k["recebido"])),
-        ("Custo total", cc.brl(k["total"])), ("% indireto", f"{k['pct_indireto']:.1f}%".replace(".", ",")),
-        ("Rateado p/ outros", cc.brl(k["rateado"])),
-    ]):
-        with col.container(border=True): st.metric(rot, val)
-
-    if L.empty:
-        st.info("Nenhum centro de custo com movimentação para estes filtros.")
-        return
-
-    esq, dir_ = st.columns([1.15, 1], gap="medium")
-    with esq:
-        bloco_segmentos(L, i, cad, periodos, com_origem)
-        sel_id = bloco_centros(L)
-    with dir_:
-        painel_detalhe(sel_id, res_all, d, i, cad, periodos, todos, com_origem)
-
-def bloco_upload(tipo, titulo, campos, normalizar):
-    st.subheader(titulo)
-    arq = st.file_uploader(f"Planilha (.xlsx) — {titulo.lower()}", type=["xlsx"], key=f"up_{tipo}")
-    if arq is None: return
-    raw = ler_excel(arq.getvalue())
-    auto = cc.auto_mapear(raw.columns, campos)
-    faltando = [rot for ch, rot, obr, _ in campos if obr and not auto[ch]]
-
-    opcoes = ["— não usar —"] + [str(c) for c in raw.columns]
-    mapa = {}
-    with st.expander("Mapeamento de colunas", expanded=bool(faltando)):
-        for ch, rot, obr, _ in campos:
-            padrao = opcoes.index(str(auto[ch])) if auto[ch] is not None else 0
-            esc = st.selectbox(rot + (" *" if obr else ""), opcoes, index=padrao, key=f"map_{tipo}_{ch}_{arq.name}")
-            mapa[ch] = None if esc == opcoes[0] else esc
-
-    ainda = [rot for ch, rot, obr, _ in campos if obr and not mapa[ch]]
-    if ainda:
-        st.error("Faltam colunas: " + ", ".join(ainda))
-        return
-    st.caption(f"{len(raw):,} linhas lidas.".replace(",", "."))
-    if st.button("Carregar base", key=f"btn_{tipo}", type="primary"):
-        df = normalizar(raw, mapa)
-        st.session_state[f"df_{tipo}"] = df
-        salvar_base(tipo, df)
-        atualizar_cadastro()
-        st.success(f"✅ {len(df):,} linhas carregadas.")
-
-def bloco_base(tipo, titulo):
-    st.subheader(titulo)
-    df = st.session_state[f"df_{tipo}"]
-    if df is None:
-        st.info("Nenhuma base carregada.")
-        return
-    ps = sorted(df["periodo"].unique())
-    st.caption(f"{len(df):,} linhas · Total {cc.brl(df['valor'].sum())}")
-    mostrar(st.dataframe, df.head(10))
-    if st.button("🗑️ Excluir esta base", key=f"del_{tipo}"):
-        remover_base(tipo)
-        st.rerun()
-
-def pagina_dados():
-    st.title("📥 Gerenciamento de bases de custos")
-    tab1, tab2 = st.tabs(["Upload de arquivos", "Visualizar & excluir bases"])
-    with tab1:
-        c1, c2 = st.columns(2)
-        with c1: bloco_upload("direto", "Custos diretos", cc.CAMPOS_DIRETO, cc.normalizar_direto)
-        with c2: bloco_upload("indireto", "Custos indiretos (rateios)", cc.CAMPOS_INDIRETO, cc.normalizar_indireto)
-    with tab2:
-        c1, c2 = st.columns(2)
-        with c1: bloco_base("direto", "Base direta")
-        with c2: bloco_base("indireto", "Base indireta")
-
-# ======================================================================
-# Navegação
-# ======================================================================
-logo = Path(__file__).parent / "logo_feso.png"
-if logo.exists(): mostrar(st.sidebar.image, str(logo))
-st.sidebar.title("Navegação")
-menu = st.sidebar.radio("Selecione a página:", ["📊 Dashboard Principal", "📥 Gerenciar Dados"])
-if menu == "📊 Dashboard Principal": pagina_dashboard()
-else: pagina_dados()
+def total_rateado_pela_origem(indireto, periodos) -> pd.Series:
+    ii = indireto[indireto["periodo"].isin(periodos)]
+    return ii.groupby("origem_id")["valor"].sum()
