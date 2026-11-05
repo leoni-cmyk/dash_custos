@@ -35,12 +35,6 @@ def mostrar(func, *args, **kw):
     except (TypeError, st.errors.StreamlitAPIException):
         return func(*args, use_container_width=True, **kw)
 
-def chips(label, opcoes, padrao, key, fmt=str):
-    if hasattr(st, "pills"):
-        v = st.pills(label, opcoes, default=padrao, format_func=fmt, key=key)
-        return padrao if v is None else v
-    return st.radio(label, opcoes, index=opcoes.index(padrao), format_func=fmt, key=key, horizontal=True)
-
 def tabela(df, fmt=None, altura=None, **kw):
     obj = df.style.format(fmt) if fmt else df
     if altura is None:
@@ -255,25 +249,38 @@ def pagina_dashboard():
 
     com_origem = cc.tem_origem(i)
     todos = cc.periodos_disponiveis(d, i)
-
-    sel_p = chips("Período", ["__todos__"] + todos, "__todos__", "f_per",
-                  lambda p: "Ano todo" if p == "__todos__" else cc.rotulo_periodo(p))
-    periodos = todos if sel_p == "__todos__" else [sel_p]
-
     existentes = set(cad["classificacao"])
-    classifs = ["Todos"] + [c for c in cc.ORDEM_CLASSIF if c in existentes] + sorted(existentes - set(cc.ORDEM_CLASSIF))
-    f1, f2, f3 = st.columns([2.2, 3, 2])
-    with f1: sel_c = chips("Classificação", classifs, "Todos", "f_cls")
-    with f2: sel_s = chips("Segmento", ["Todos"] + sorted(cad["segmento"].unique()), "Todos", "f_seg")
-    with f3: busca = st.text_input("Buscar", placeholder="Buscar centro de custo…", label_visibility="collapsed")
+    opcoes_classif = [c for c in cc.ORDEM_CLASSIF if c in existentes] + sorted(existentes - set(cc.ORDEM_CLASSIF))
+    opcoes_seg = sorted(cad["segmento"].unique())
+
+    # NOVOS FILTROS: Listas suspensas (Dropdowns) lado a lado
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        sel_p = st.multiselect("Períodos", options=todos, default=todos, format_func=cc.rotulo_periodo)
+        periodos = sel_p if sel_p else todos
+    with f2:
+        sel_c = st.multiselect("Classificações", options=opcoes_classif, default=opcoes_classif)
+        classificacoes = sel_c if sel_c else opcoes_classif
+    with f3:
+        sel_s = st.multiselect("Segmentos", options=opcoes_seg, default=opcoes_seg)
+        segmentos = sel_s if sel_s else opcoes_seg
+    with f4:
+        busca = st.text_input("Buscar", placeholder="Nome ou código do centro...", label_visibility="visible")
 
     res_all = cc.resumo_centros(d, i, cad, periodos)
-    L = cc.filtrar_centros(res_all, sel_c, sel_s, busca)
+    L = cc.filtrar_centros(res_all, classificacoes, segmentos, busca)
     k = cc.kpis(L)
 
-    faixa = "Ano todo" if sel_p == "__todos__" else cc.rotulo_periodo(sel_p)
-    if sel_p == "__todos__": faixa = f"{cc.rotulo_periodo(todos[0])[:3]}–{cc.rotulo_periodo(todos[-1])}"
-    st.caption(f"{faixa} · {len(L)} centros")
+    # Lógica para mostrar corretamente "Ano todo" ou "Mes A a Mes B"
+    if len(periodos) == len(todos):
+        faixa = "Ano todo"
+    elif len(periodos) == 1:
+        faixa = cc.rotulo_periodo(periodos[0])
+    else:
+        ps = sorted(periodos)
+        faixa = f"{cc.rotulo_periodo(ps[0])} a {cc.rotulo_periodo(ps[-1])}"
+        
+    st.caption(f"{faixa} · {len(L)} centros filtrados")
 
     cols = st.columns(5)
     for col, (rot, val) in zip(cols, [
@@ -284,7 +291,7 @@ def pagina_dashboard():
         with col.container(border=True): st.metric(rot, val)
 
     if L.empty:
-        st.info("Nenhum centro de custo com movimentação.")
+        st.info("Nenhum centro de custo com movimentação para estes filtros.")
         return
 
     esq, dir_ = st.columns([1.15, 1], gap="medium")
