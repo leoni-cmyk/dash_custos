@@ -171,10 +171,12 @@ def resumo_centros(direto, indireto, cad, periodos) -> pd.DataFrame:
     out["total"] = out["direto"] + out["recebido"]
     return out.reset_index()
 
-def filtrar_centros(res, classificacao="Todos", segmento="Todos", busca="") -> pd.DataFrame:
+def filtrar_centros(res, classificacoes=None, segmentos=None, busca="") -> pd.DataFrame:
     m = pd.Series(True, index=res.index)
-    if classificacao != "Todos": m &= res["classificacao"] == classificacao
-    if segmento != "Todos": m &= res["segmento"] == segmento
+    if classificacoes: 
+        m &= res["classificacao"].isin(classificacoes)
+    if segmentos: 
+        m &= res["segmento"].isin(segmentos)
     if busca:
         q = busca.lower().strip()
         m &= res["cc_nome"].str.lower().str.contains(q, regex=False) | res["cc_id"].str.contains(q, regex=False)
