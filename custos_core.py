@@ -18,9 +18,6 @@ ORDEM_CONTAS = [
     "Despesas Financeiras", "Impostos, Taxas e Multas", "Aluguéis", "Depreciação"
 ]
 
-# ----------------------------------------------------------------------
-# Campos esperados
-# ----------------------------------------------------------------------
 CAMPOS_DIRETO = [
     ("periodo", "Período", True, ["periodo", "competencia", "mes", "ano mes", "anomes", "cdperiodocompetencia"]),
     ("cc_nome", "Centro de custo (nome)", True, ["centro de custo", "nome centro de custo", "cc", "descricao", "nocentrocusto"]),
@@ -45,7 +42,7 @@ CAMPOS_INDIRETO = [
 ]
 
 # ----------------------------------------------------------------------
-# Formatação e Datas
+# Utilitários de Formatação e Normalização
 # ----------------------------------------------------------------------
 def brl(v) -> str:
     if pd.isna(v): return "–"
@@ -184,14 +181,45 @@ def filtrar_centros(res, classificacoes=None, segmentos=None, busca="") -> pd.Da
     res = res[m]
     return res[(res[["direto", "recebido", "rateado"]] != 0).any(axis=1)]
 
-def kpis(res: pd.DataFrame) -> dict:
-    d, r, o = res["direto"].sum(), res["recebido"].sum(), res["rateado"].sum()
-    return {"direto": d, "recebido": r, "total": d + r, "pct_indireto": (r / (d + r) * 100) if (d + r) else 0.0, "rateado": o}
+def kpis(res: pd.DataFrame, indireto=None, periodos=None, segmentos_filtrados=None) -> dict:
+    d = res["direto"].sum()
+    
+    # Exclusão Intra-Segmento para visão agregada de segmento (quando não é um CC único)
+    if segmentos_filtrados and indireto is not None and periodos is not None and len(res) > 1:
+        ii = indireto[indireto["periodo"].isin(periodos)]
+        r = ii[(ii["destino_segmento"].isin(segmentos_filtrados)) & (~ii["origem_segmento"].isin(segmentos_filtrados))]["valor"].sum()
+        o = ii[(ii["origem_segmento"].isin(segmentos_filtrados)) & (~ii["destino_segmento"].isin(segmentos_filtrados))]["valor"].sum()
+    else:
+        r = res["recebido"].sum()
+        o = res["rateado"].sum()
+        
+    tot = d + r
+    return {"direto": d, "recebido": r, "total": tot, "pct_indireto": (r / tot * 100) if tot else 0.0, "rateado": o}
 
-def resumo_segmentos(res: pd.DataFrame) -> pd.DataFrame:
-    g = res.groupby("segmento")[["direto", "recebido", "rateado"]].sum()
-    g["total"] = g["direto"] + g["recebido"]
-    return g.sort_values("total", ascending=False).reset_index()
+def resumo_segmentos(res: pd.DataFrame, indireto=None, periodos=None) -> pd.DataFrame:
+    if indireto is not None and periodos is not None:
+        ii = indireto[indireto["periodo"].isin(periodos)]
+        segs = sorted(res["segmento"].unique())
+        linhas = []
+        for s in segs:
+            d_val = res[res["segmento"] == s]["direto"].sum()
+            # Inter-segmento: recebido vindo de OUTROS segmentos
+            rec_inter = ii[(ii["destino_segmento"] == s) & (ii["origem_segmento"] != s)]["valor"].sum()
+            # Inter-segmento: rateado enviado para OUTROS segmentos
+            rat_inter = ii[(ii["origem_segmento"] == s) & (ii["destino_segmento"] != s)]["valor"].sum()
+            linhas.append({
+                "segmento": s,
+                "direto": d_val,
+                "recebido": rec_inter,
+                "total": d_val + rec_inter,
+                "rateado": rat_inter
+            })
+        g = pd.DataFrame(linhas)
+    else:
+        g = res.groupby("segmento")[["direto", "recebido", "rateado"]].sum()
+        g["total"] = g["direto"] + g["recebido"]
+        g = g.reset_index()
+    return g.sort_values("total", ascending=False).reset_index(drop=True)
 
 def matriz_segmentos(indireto, cad, ids_origem, periodos) -> pd.DataFrame:
     ii = indireto[indireto["periodo"].isin(periodos) & indireto["origem_id"].isin(ids_origem)]
@@ -227,30 +255,58 @@ def total_rateado_pela_origem(indireto, periodos) -> pd.Series:
     return ii.groupby("origem_id")["valor"].sum()
 
 # ----------------------------------------------------------------------
-# NOVIDADE: Funções para a aba de Relatório Consolidado (Estilo Excel)
+# Relatório Consolidado (Pivot Matricial com Meses 01-12, Total e Média)
 # ----------------------------------------------------------------------
-def relatorio_direto_pivot(direto, cc_id, ano_selecionado):
-    d = direto[(direto["cc_id"] == cc_id) & (direto["periodo"].str.startswith(str(ano_selecionado))) & (direto["grupo"].notna())]
-    if d.empty: return pd.DataFrame()
-    d = d.copy()
-    d["mes"] = d["periodo"].str[-2:]
+def relatorio_direto_pivot(direto, cc_id, ano_selecionado, mes_limite=12):
+    d = direto[(direto["cc_id"] == cc_id) & (direto["periodo"].astype(str).str.startswith(str(ano_selecionado))) & (direto["grupo"].notna())].copy()
     
-    # Criar a pivot table (linhas = grupo, colunas = mes)
+    cols_meses = [f"{m:02d}" for m in range(1, 13)]
+    
+    if d.empty:
+        df_empty = pd.DataFrame(0.0, index=ORDEM_CONTAS, columns=cols_meses + ["TOTAL", "MÉDIA"])
+        df_empty.index.name = "grupo"
+        df_empty.loc["TOTAL DO CUSTO DIRETO"] = 0.0
+        return df_empty
+
+    d["mes"] = d["periodo"].astype(str).str[-2:]
     pv = d.pivot_table(index="grupo", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
-    pv["TOTAL"] = pv.sum(axis=1)
+    pv = pv.reindex(columns=cols_meses, fill_value=0.0)
     
-    # Ordenar conforme o Excel (ORDEM_CONTAS)
+    cols_limite = [f"{m:02d}" for m in range(1, mes_limite + 1)]
+    pv["TOTAL"] = pv[cols_limite].sum(axis=1)
+    pv["MÉDIA"] = pv["TOTAL"] / max(1, mes_limite)
+    
     ordem_dict = {c: i for i, c in enumerate(ORDEM_CONTAS)}
     pv = pv.reset_index()
     pv["_ordem"] = pv["grupo"].map(lambda x: ordem_dict.get(x, 999))
-    pv = pv.sort_values("_ordem").drop(columns=["_ordem"])
+    pv = pv.sort_values("_ordem").drop(columns=["_ordem"]).set_index("grupo")
     
-    pv.loc["TOTAL DIRETO"] = pv.sum(numeric_only=True)
-    pv.at["TOTAL DIRETO", "grupo"] = "TOTAL DO CUSTO DIRETO"
-    return pv.set_index("grupo")
+    pv.loc["TOTAL DO CUSTO DIRETO"] = pv.sum(numeric_only=True)
+    return pv
 
-def relatorio_indireto_drilldown(indireto, cc_id, ano_selecionado):
-    ii = indireto[(indireto["destino_id"] == cc_id) & (indireto["periodo"].str.startswith(str(ano_selecionado)))]
-    if ii.empty: return pd.DataFrame()
-    # Retorna o detalhamento completo para fazer o drill-down na tela
-    return ii.groupby(["origem_segmento", "origem_nome", "origem_id"])["valor"].sum().reset_index()
+def relatorio_indireto_pivot(indireto, cc_id, ano_selecionado, mes_limite=12):
+    ii = indireto[(indireto["destino_id"] == cc_id) & (indireto["periodo"].astype(str).str.startswith(str(ano_selecionado)))].copy()
+    
+    cols_meses = [f"{m:02d}" for m in range(1, 13)]
+    
+    if ii.empty:
+        return pd.DataFrame()
+
+    ii["mes"] = ii["periodo"].astype(str).str[-2:]
+    
+    seg = ii["origem_segmento"].fillna("Sem Segmento")
+    nome = ii["origem_nome"].fillna(ii["origem_id"])
+    cod = ii["origem_id"].fillna("")
+    ii["origem_rotulo"] = seg + " - " + nome + " (" + cod + ")"
+    
+    pv = ii.pivot_table(index="origem_rotulo", columns="mes", values="valor", aggfunc="sum", fill_value=0.0)
+    pv = pv.reindex(columns=cols_meses, fill_value=0.0)
+    
+    cols_limite = [f"{m:02d}" for m in range(1, mes_limite + 1)]
+    pv["TOTAL"] = pv[cols_limite].sum(axis=1)
+    pv["MÉDIA"] = pv["TOTAL"] / max(1, mes_limite)
+    
+    pv = pv.sort_values("TOTAL", ascending=False)
+    pv.loc["TOTAL DO CUSTO INDIRETO"] = pv.sum(numeric_only=True)
+    pv.index.name = "Origem do Rateio"
+    return pv
