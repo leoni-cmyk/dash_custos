@@ -124,8 +124,15 @@ def bloco_fluxo(df, titulo_setor, absorvido=None):
     por_seg = df.groupby("segmento")["valor"].sum().sort_values(ascending=False).reset_index()
     st.markdown("**Por segmento**")
     tabela(pd.DataFrame({"Segmento": por_seg["segmento"], "Valor": por_seg["valor"], "%": [cc.pct(v, total) for v in por_seg["valor"]]}), {"Valor": cc.brl})
+    
     st.markdown(f"**{titulo_setor}**")
-    t = pd.DataFrame({titulo_setor: df["cc_nome"], "Classif": df["classificacao"], "Valor": df["valor"], "%": [cc.pct(v, total) for v in df["valor"]]})
+    t = pd.DataFrame({
+        titulo_setor: df["cc_nome"],
+        "Segmento": df["segmento"],
+        "Classif": df["classificacao"],
+        "Valor": df["valor"],
+        "%": [cc.pct(v, total) for v in df["valor"]]
+    })
     fmt = {"Valor": cc.brl}
     if absorvido is not None:
         t["Total origem"] = df["cc_id"].map(absorvido)
@@ -169,12 +176,25 @@ def painel_detalhe(cc_id, res_all, d, i, cad, periodos, todos, com_origem):
                 st.markdown("### Rateio recebido de")
                 bloco_fluxo(org, "Setor de origem", absorvido=cc.total_rateado_pela_origem(i, periodos))
 
-def bloco_segmentos(L, i, cad, periodos, com_origem):
+def bloco_segmentos(L, i, cad, periodos, com_origem, segmentos_filtrados=None):
     seg = cc.resumo_segmentos(L, i, periodos)
     with st.container(border=True):
         st.markdown("### Visão por segmento (custos externos absorvidos)")
-        t = pd.DataFrame({"Segmento": seg["segmento"], "Direto": seg["direto"], "Recebido (Inter)": seg["recebido"], "Total": seg["total"], "Rateado (Inter)": seg["rateado"]})
+        t = pd.DataFrame({
+            "Segmento": seg["segmento"],
+            "Direto": seg["direto"],
+            "Recebido (Inter)": seg["recebido"],
+            "Total": seg["total"],
+            "Rateado (Inter)": seg["rateado"]
+        })
         tabela(t, {"Direto": cc.brl, "Recebido (Inter)": cc.brl, "Total": cc.brl, "Rateado (Inter)": dash})
+
+        # Detalhamento de quem enviou os rateios inter-segmento se houver filtro de segmento
+        if segmentos_filtrados and len(segmentos_filtrados) < len(cad["segmento"].unique()):
+            dt_inter = cc.detalhe_origens_inter_segmento(i, periodos, segmentos_filtrados)
+            if not dt_inter.empty:
+                st.markdown("#### 🔍 Origem dos Rateios Inter-Segmento Recebidos")
+                tabela(dt_inter, {"Valor Recebido": cc.brl, "% do Recebido Inter": lambda v: f"{v:.1f}%".replace(".", ",")})
 
         if not com_origem: return
         mx = cc.matriz_segmentos(i, cad, set(L["cc_id"]), periodos)
@@ -238,7 +258,6 @@ def pagina_dashboard():
     res_all = cc.resumo_centros(d, i, cad, periodos)
     L = cc.filtrar_centros(res_all, sel_c, sel_s, busca)
     
-    # Captura da Seleção de Centro de Custo
     T_ordenado = L.sort_values("total", ascending=False).reset_index(drop=True)
     sel_id = None
     estado_tbl = st.session_state.get("tbl_centros")
@@ -246,7 +265,6 @@ def pagina_dashboard():
         linha = estado_tbl["selection"]["rows"][0]
         if linha < len(T_ordenado): sel_id = T_ordenado["cc_id"].iloc[linha]
 
-    # KPIs Dinâmicos (Aplicando a regra inter-segmento se for filtrado por Segmentos)
     L_kpi = L[L["cc_id"] == sel_id] if sel_id else L
     k = cc.kpis(L_kpi, indireto=i, periodos=periodos, segmentos_filtrados=sel_s if not sel_id else None)
     
@@ -264,13 +282,13 @@ def pagina_dashboard():
     
     esq, dir_ = st.columns([1.15, 1], gap="medium")
     with esq:
-        bloco_segmentos(L, i, cad, periodos, com_origem)
+        bloco_segmentos(L, i, cad, periodos, com_origem, segmentos_filtrados=sel_s)
         bloco_centros(L)
     with dir_:
         painel_detalhe(sel_id, res_all, d, i, cad, periodos, todos, com_origem)
 
 def pagina_relatorio():
-    st.title("📄 Relatório Consolidado (Excel)")
+    st.title("📄 Relatório Consolidado")
     d, i, cad = st.session_state["df_direto"], st.session_state["df_indireto"], st.session_state["cadastro"]
     if d is None or i is None: return st.warning("Dados não carregados.")
 
@@ -292,13 +310,30 @@ def pagina_relatorio():
     cc_id = cc_buscado.split(" - ")[0]
     info = cad[cad["cc_id"] == cc_id].iloc[0]
     
-    st.markdown(f"## {info['cc_nome']}")
-    st.caption(f"Código: {cc_id} | Classificação: {info['classificacao']} | Segmento: {info['segmento']}")
+    col_tit, col_pdf = st.columns([4, 1])
+    with col_tit:
+        st.markdown(f"## {info['cc_nome']}")
+        st.caption(f"Código: {cc_id} | Classificação: {info['classificacao']} | Segmento: {info['segmento']}")
+    
+    pv_dir = cc.relatorio_direto_pivot(d, cc_id, ano_sel, mes_limite=mes_limite)
+    pv_seg, detalhes_seg = cc.relatorio_indireto_por_segmento(i, cc_id, ano_sel, mes_limite=mes_limite)
+    
+    with col_pdf:
+        pdf_bytes = cc.gerar_pdf_relatorio(info, pv_dir, pv_seg, detalhes_seg, ano_sel, mes_limite)
+        if pdf_bytes:
+            st.download_button(
+                label="📄 Baixar PDF",
+                data=pdf_bytes,
+                file_name=f"Relatorio_Custos_{cc_id}_{ano_sel}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True
+            )
+
     st.markdown("---")
     
     # 1. Matriz Custo Direto (01 a 12 + Total + Média)
     st.subheader(f"1. Evolução do Custo Direto (Acumulado até Mês {mes_limite:02d})")
-    pv_dir = cc.relatorio_direto_pivot(d, cc_id, ano_sel, mes_limite=mes_limite)
     if pv_dir.empty or (pv_dir.drop(columns=["TOTAL", "MÉDIA"], errors="ignore").sum().sum() == 0):
         st.caption("Sem custos diretos registrados neste ano.")
     else:
@@ -307,15 +342,22 @@ def pagina_relatorio():
         
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # 2. Matriz Custo Indireto / Rateio Recebido (01 a 12 + Total + Média por Origem)
+    # 2. Resumo e Drill-Down do Rateio Recebido por Segmento
     st.subheader(f"2. Origens do Custo Indireto - Rateio Recebido (Acumulado até Mês {mes_limite:02d})")
-    pv_ind = cc.relatorio_indireto_pivot(i, cc_id, ano_sel, mes_limite=mes_limite)
     
-    if pv_ind.empty:
+    if pv_seg.empty:
         st.caption("Este centro não recebeu rateios indiretos neste ano.")
     else:
-        fmt = {col: cc.brl for col in pv_ind.columns}
-        st.dataframe(pv_ind.style.format(fmt), use_container_width=True, height=min(38 * (len(pv_ind) + 1) + 3, 500))
+        st.markdown("#### 🏢 Resumo por Segmento de Origem")
+        fmt_seg = {col: cc.brl for col in pv_seg.columns}
+        st.dataframe(pv_seg.style.format(fmt_seg), use_container_width=True, height=min(38 * (len(pv_seg) + 1) + 3, 300))
+        
+        st.markdown("#### 🔍 Detalhamento (Drill-Down por Centro de Custo)")
+        for seg_nome, pv_sub in detalhes_seg.items():
+            tot_seg_val = pv_sub.loc[f"TOTAL {seg_nome.upper()}", "TOTAL"] if f"TOTAL {seg_nome.upper()}" in pv_sub.index else 0.0
+            with st.expander(f"📌 Rateio vindo do Segmento: **{seg_nome}** — Total Absorvido: **{cc.brl(tot_seg_val)}**"):
+                fmt_sub = {col: cc.brl for col in pv_sub.columns}
+                st.dataframe(pv_sub.style.format(fmt_sub), use_container_width=True, height=min(38 * (len(pv_sub) + 1) + 3, 400))
 
 def bloco_upload(tipo, titulo, campos, normalizar):
     st.subheader(titulo)
